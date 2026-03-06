@@ -1,37 +1,41 @@
 "use strict";
 
-const express = require("express");
-const session = require("express-session");
-const cors = require("cors");
-const cron = require("node-cron");
-const path = require("path");
-const fs = require("fs");
-const {
-  IgApiClient,
-  IgCheckpointError,
-  IgLoginTwoFactorRequiredError,
-} = require("instagram-private-api");
+var express = require("express");
+var session = require("express-session");
+var cors = require("cors");
+var cron = require("node-cron");
+var path = require("path");
+var fs = require("fs");
+var igModule = require("instagram-private-api");
+var IgApiClient = igModule.IgApiClient;
+var IgCheckpointError = igModule.IgCheckpointError;
+var IgLoginTwoFactorRequiredError = igModule.IgLoginTwoFactorRequiredError;
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  CONFIG
-// -------------------------------------------------------------
-const PORT      = process.env.PORT      || 3000;
-const DB_PATH   = path.join(__dirname, "db.json");
-const PROXY_URL = process.env.PROXY_URL || null;
+// ---------------------------------------------------------------
+var PORT = process.env.PORT || 3000;
+var DB_PATH = path.join(__dirname, "db.json");
+var PROXY_URL = process.env.PROXY_URL || null;
+var SUPABASE_URL = process.env.SUPABASE_URL || "";
+var SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+var SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || "";
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  LOGGING
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 function log(tag, msg) {
-  const t = new Date().toLocaleTimeString("en-US", { hour12: false });
-  console.log(`[${t}] [${tag}] ${msg}`);
+  var t = new Date().toLocaleTimeString("en-US", { hour12: false });
+  console.log("[" + t + "] [" + tag + "] " + msg);
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  UTILITIES
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 function sleep(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
 }
 
 function fmtDate(ts) {
@@ -46,9 +50,9 @@ function fmtDate(ts) {
   });
 }
 
-// -------------------------------------------------------------
-//  DATABASE  - atomic writes prevent corruption
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
+//  DATABASE - atomic writes prevent corruption
+// ---------------------------------------------------------------
 function dbRead() {
   if (!fs.existsSync(DB_PATH)) {
     var blank = { accounts: {}, spyTargets: {} };
@@ -59,7 +63,7 @@ function dbRead() {
     return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   } catch (e) {
     log("db", "Read error, returning blank: " + e.message);
-    return { accounts: {} };
+    return { accounts: {}, spyTargets: {} };
   }
 }
 
@@ -69,16 +73,16 @@ function dbWrite(data) {
   fs.renameSync(tmp, DB_PATH);
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  IN-MEMORY STORES
-// -------------------------------------------------------------
-var igSessions    = {};
+// ---------------------------------------------------------------
+var igSessions = {};
 var pendingLogins = {};
-var syncLocks     = {};
+var syncLocks = {};
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  IG CLIENT FACTORY
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 function makeIgClient(username) {
   var ig = new IgApiClient();
   ig.state.generateDevice(username);
@@ -89,13 +93,13 @@ function makeIgClient(username) {
   return ig;
 }
 
-// -------------------------------------------------------------
-//  FETCH ALL FOLLOWERS  with retry + progress
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
+//  FETCH ALL FOLLOWERS with retry + progress
+// ---------------------------------------------------------------
 async function fetchAllFollowers(ig, userId, onCount) {
-  var feed    = ig.feed.accountFollowers(userId);
+  var feed = ig.feed.accountFollowers(userId);
   var results = [];
-  var page    = 0;
+  var page = 0;
 
   do {
     var items;
@@ -108,7 +112,7 @@ async function fetchAllFollowers(ig, userId, onCount) {
       } catch (err) {
         lastErr = err;
         if (attempt < 3) {
-          log("fetch", "Page " + page + " attempt " + attempt + " failed, retrying...");
+          log("fetch", "Page " + page + " attempt " + attempt + " failed, retrying");
           await sleep(attempt * 2000);
         }
       }
@@ -118,48 +122,46 @@ async function fetchAllFollowers(ig, userId, onCount) {
     for (var i = 0; i < items.length; i++) {
       var u = items[i];
       results.push({
-        pk:              String(u.pk),
-        username:        u.username        || "",
-        full_name:       u.full_name       || "",
+        pk: String(u.pk),
+        username: u.username || "",
+        full_name: u.full_name || "",
         profile_pic_url: u.profile_pic_url || "",
       });
     }
 
     page++;
     if (onCount) onCount(results.length);
-
     await sleep(page % 5 === 0 ? 2000 : 900);
     if (page > 300) break;
-
   } while (feed.isMoreAvailable());
 
   return results;
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  COMPARE FOLLOWERS
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 function compareFollowers(oldList, newList) {
-  var newPKs = new Set(newList.map(function(u) { return u.pk; }));
-  var oldPKs = new Set(oldList.map(function(u) { return u.pk; }));
-  var ts  = Date.now();
+  var newPKs = new Set(newList.map(function (u) { return u.pk; }));
+  var oldPKs = new Set(oldList.map(function (u) { return u.pk; }));
+  var ts = Date.now();
   var fmt = fmtDate(ts);
 
   var unfollowers = oldList
-    .filter(function(u) { return !newPKs.has(u.pk); })
-    .map(function(u) {
+    .filter(function (u) { return !newPKs.has(u.pk); })
+    .map(function (u) {
       return Object.assign({}, u, {
-        unfollowedAt:          ts,
+        unfollowedAt: ts,
         unfollowedAtFormatted: fmt,
-        dismissed:             false,
+        dismissed: false,
       });
     });
 
   var gained = newList
-    .filter(function(u) { return !oldPKs.has(u.pk); })
-    .map(function(u) {
+    .filter(function (u) { return !oldPKs.has(u.pk); })
+    .map(function (u) {
       return Object.assign({}, u, {
-        followedAt:          ts,
+        followedAt: ts,
         followedAtFormatted: fmt,
       });
     });
@@ -167,86 +169,87 @@ function compareFollowers(oldList, newList) {
   return { unfollowers: unfollowers, gained: gained };
 }
 
-// -------------------------------------------------------------
-//  FINALIZE LOGIN
-// -------------------------------------------------------------
-async function finalizeLogin(ig, user, username, req) {
+// ---------------------------------------------------------------
+//  FINALIZE INSTAGRAM LOGIN
+// ---------------------------------------------------------------
+async function finalizeIgLogin(ig, user, igUsername, appUser, req) {
   var serialized = await ig.state.serialize();
   delete serialized.constants;
 
-  igSessions[username]    = { ig: ig, userId: String(user.pk) };
-  delete pendingLogins[username];
+  igSessions[appUser] = { ig: ig, userId: String(user.pk), igUsername: igUsername };
+  delete pendingLogins[appUser];
 
-  var db       = dbRead();
-  var existing = db.accounts[username] || {};
+  var db = dbRead();
+  var existing = db.accounts[appUser] || {};
 
-  db.accounts[username] = {
-    username:         username,
-    userId:           String(user.pk),
-    fullName:         user.full_name       || existing.fullName   || "",
-    profilePic:       user.profile_pic_url || existing.profilePic || "",
+  db.accounts[appUser] = {
+    appUser: appUser,
+    igUsername: igUsername,
+    userId: String(user.pk),
+    fullName: user.full_name || existing.fullName || "",
+    profilePic: user.profile_pic_url || existing.profilePic || "",
     currentFollowers: existing.currentFollowers || [],
-    unfollowers:      existing.unfollowers      || [],
-    gainedFollowers:  existing.gainedFollowers   || [],
-    snapshots:        existing.snapshots         || [],
-    tracking:         existing.tracking          || false,
-    lastChecked:      existing.lastChecked       || null,
-    sessionState:     serialized,
+    unfollowers: existing.unfollowers || [],
+    gainedFollowers: existing.gainedFollowers || [],
+    snapshots: existing.snapshots || [],
+    tracking: existing.tracking || false,
+    lastChecked: existing.lastChecked || null,
+    sessionState: serialized,
+    isPro: existing.isPro || false,
   };
 
   dbWrite(db);
-  req.session.username = username;
-  log("auth", "@" + username + " logged in successfully");
+  log("auth", "IG @" + igUsername + " connected for app user " + appUser);
 }
 
-// -------------------------------------------------------------
-//  REHYDRATE SESSION FROM DISK
-// -------------------------------------------------------------
-async function rehydrate(username) {
-  if (igSessions[username]) return igSessions[username];
+// ---------------------------------------------------------------
+//  REHYDRATE IG SESSION FROM DISK
+// ---------------------------------------------------------------
+async function rehydrate(appUser) {
+  if (igSessions[appUser]) return igSessions[appUser];
 
-  var db      = dbRead();
-  var account = db.accounts[username];
+  var db = dbRead();
+  var account = db.accounts[appUser];
   if (!account || !account.sessionState) return null;
 
   try {
-    var ig = makeIgClient(username);
+    var ig = makeIgClient(account.igUsername);
     await ig.state.deserialize(account.sessionState);
-    igSessions[username] = { ig: ig, userId: account.userId };
-    log("session", "@" + username + " session restored from disk");
-    return igSessions[username];
+    igSessions[appUser] = { ig: ig, userId: account.userId, igUsername: account.igUsername };
+    log("session", "IG @" + account.igUsername + " session restored from disk");
+    return igSessions[appUser];
   } catch (e) {
-    log("session", "@" + username + " restore failed: " + e.message);
+    log("session", "IG @" + account.igUsername + " restore failed: " + e.message);
     return null;
   }
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  CORE SYNC
-// -------------------------------------------------------------
-async function runSync(username, onProgress) {
-  if (syncLocks[username]) {
+// ---------------------------------------------------------------
+async function runSync(appUser, onProgress) {
+  if (syncLocks[appUser]) {
     throw new Error("SYNC_IN_PROGRESS");
   }
-  syncLocks[username] = true;
+  syncLocks[appUser] = true;
 
   function notify(msg, pct) {
     if (onProgress) onProgress(msg, pct);
   }
 
   try {
-    var s = await rehydrate(username);
+    var s = await rehydrate(appUser);
     if (!s) throw new Error("SESSION_EXPIRED");
 
     notify("Connecting to Instagram...", 5);
 
-    var db      = dbRead();
-    var account = db.accounts[username];
+    var db = dbRead();
+    var account = db.accounts[appUser];
     if (!account) throw new Error("Account not found in database");
 
     notify("Fetching your followers...", 10);
 
-    var newFollowers = await fetchAllFollowers(s.ig, s.userId, function(count) {
+    var newFollowers = await fetchAllFollowers(s.ig, s.userId, function (count) {
       var pct = Math.min(10 + Math.floor(count / 5), 75);
       notify("Fetching followers... " + count + " loaded", pct);
     });
@@ -254,104 +257,209 @@ async function runSync(username, onProgress) {
     notify("Comparing with previous snapshot...", 80);
 
     var oldFollowers = account.currentFollowers || [];
-    var isBaseline   = oldFollowers.length === 0;
+    var isBaseline = oldFollowers.length === 0;
 
     var compared = isBaseline
       ? { unfollowers: [], gained: [] }
       : compareFollowers(oldFollowers, newFollowers);
 
     var newUnfollowers = compared.unfollowers;
-    var gained         = compared.gained;
+    var gained = compared.gained;
 
+    // Merge unfollowers
     var existingUMap = {};
-    (account.unfollowers || []).forEach(function(u) { existingUMap[u.pk] = u; });
-    newUnfollowers.forEach(function(u) {
+    (account.unfollowers || []).forEach(function (u) { existingUMap[u.pk] = u; });
+    newUnfollowers.forEach(function (u) {
       if (!existingUMap[u.pk]) existingUMap[u.pk] = u;
     });
     var mergedUnfollowers = Object.values(existingUMap);
 
+    // Merge gained followers - keep last 200
     var existingGMap = {};
-    (account.gainedFollowers || []).forEach(function(u) { existingGMap[u.pk] = u; });
-    gained.forEach(function(u) { existingGMap[u.pk] = u; });
+    (account.gainedFollowers || []).forEach(function (u) { existingGMap[u.pk] = u; });
+    gained.forEach(function (u) { existingGMap[u.pk] = u; });
     var mergedGained = Object.values(existingGMap).slice(-200);
 
     var ts = Date.now();
     account.currentFollowers = newFollowers;
-    account.unfollowers      = mergedUnfollowers;
-    account.gainedFollowers  = mergedGained;
-    account.snapshots        = (account.snapshots || []).slice(-49).concat([{
-      timestamp:  ts,
-      count:      newFollowers.length,
+    account.unfollowers = mergedUnfollowers;
+    account.gainedFollowers = mergedGained;
+    account.snapshots = (account.snapshots || []).slice(-49).concat([{
+      timestamp: ts,
+      count: newFollowers.length,
       unfollowed: newUnfollowers.length,
-      gained:     gained.length,
+      gained: gained.length,
     }]);
     account.lastChecked = ts;
-    account.tracking    = true;
+    account.tracking = true;
 
     dbWrite(db);
     notify("Done!", 100);
 
-    log("sync", "@" + username + ": " + newFollowers.length + " followers | -" + newUnfollowers.length + " unfollowed | +" + gained.length + " gained");
+    log("sync", "@" + account.igUsername + ": " + newFollowers.length + " followers | -" + newUnfollowers.length + " unfollowed | +" + gained.length + " gained");
 
     return {
-      isBaseline:       isBaseline,
-      followerCount:    newFollowers.length,
-      newUnfollowers:   newUnfollowers.length,
-      gained:           gained.length,
-      totalUnfollowers: mergedUnfollowers.filter(function(u) { return !u.dismissed; }).length,
+      isBaseline: isBaseline,
+      followerCount: newFollowers.length,
+      newUnfollowers: newUnfollowers.length,
+      gained: gained.length,
+      totalUnfollowers: mergedUnfollowers.filter(function (u) { return !u.dismissed; }).length,
     };
-
   } finally {
-    delete syncLocks[username];
+    delete syncLocks[appUser];
   }
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
+//  SUPABASE AUTH MIDDLEWARE
+// ---------------------------------------------------------------
+async function verifySupabaseToken(token) {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+    log("auth", "Supabase not configured");
+    return null;
+  }
+  try {
+    var https = require("https");
+    var http = require("http");
+    var url = new URL(SUPABASE_URL + "/auth/v1/user");
+    var mod = url.protocol === "https:" ? https : http;
+
+    return new Promise(function (resolve) {
+      var req = mod.request(url, {
+        method: "GET",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+      }, function (res) {
+        var body = "";
+        res.on("data", function (chunk) { body += chunk; });
+        res.on("end", function () {
+          try {
+            var user = JSON.parse(body);
+            if (user && user.id) {
+              resolve(user);
+            } else {
+              resolve(null);
+            }
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      });
+      req.on("error", function () { resolve(null); });
+      req.end();
+    });
+  } catch (e) {
+    log("auth", "Token verify error: " + e.message);
+    return null;
+  }
+}
+
+function authMiddleware(req, res, next) {
+  var appUser = req.session && req.session.appUser;
+  if (appUser) {
+    req.appUser = appUser;
+    return next();
+  }
+  return res.status(401).json({ error: "Not logged in" });
+}
+
+// ---------------------------------------------------------------
 //  EXPRESS SETUP
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 var app = express();
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 app.use(session({
-  secret:            "fw-" + (process.env.SESSION_SECRET || "followwatch2024xK9"),
-  resave:            false,
+  secret: "fw-" + (process.env.SESSION_SECRET || "followwatch2024xK9"),
+  resave: false,
   saveUninitialized: false,
-  cookie:            { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true },
+  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true },
 }));
 
-// -------------------------------------------------------------
-//  ROUTE: GET /api/status
-// -------------------------------------------------------------
-app.get("/api/status", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.json({ loggedIn: false });
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/auth/login - Supabase token login
+// ---------------------------------------------------------------
+app.post("/api/auth/login", async function (req, res) {
+  var token = req.body.token;
+  var email = req.body.email;
+  var userId = req.body.userId;
 
-  var db      = dbRead();
-  var account = db.accounts[username];
-  if (!account) return res.json({ loggedIn: false });
+  if (!token || !userId) {
+    return res.status(400).json({ error: "Missing authentication data." });
+  }
+
+  // Verify token with Supabase
+  var user = await verifySupabaseToken(token);
+  if (!user || user.id !== userId) {
+    return res.status(401).json({ error: "Invalid session. Please log in again." });
+  }
+
+  var appUser = userId;
+  req.session.appUser = appUser;
+  req.session.email = email || user.email || "";
+
+  // Check if user has connected Instagram
+  var db = dbRead();
+  var account = db.accounts[appUser];
+  var igConnected = !!(account && account.igUsername);
+
+  log("auth", "App login: " + (email || userId));
 
   return res.json({
-    loggedIn:        true,
-    username:        account.username,
-    fullName:        account.fullName   || "",
-    profilePic:      account.profilePic || "",
-    followerCount:   (account.currentFollowers || []).length,
-    unfollowerCount: (account.unfollowers || []).filter(function(u) { return !u.dismissed; }).length,
-    gainedCount:     (account.gainedFollowers  || []).length,
-    snapshotCount:   (account.snapshots        || []).length,
-    lastChecked:     account.lastChecked || null,
-    tracking:        account.tracking    || false,
-    isBaseline:      (account.currentFollowers || []).length === 0,
-    syncInProgress:  !!syncLocks[username],
+    success: true,
+    appUser: appUser,
+    email: email || user.email || "",
+    igConnected: igConnected,
+    igUsername: igConnected ? account.igUsername : null,
   });
 });
 
-// -------------------------------------------------------------
-//  ROUTE: POST /api/login
-// -------------------------------------------------------------
-app.post("/api/login", async function(req, res) {
+// ---------------------------------------------------------------
+//  ROUTE: GET /api/auth/status
+// ---------------------------------------------------------------
+app.get("/api/auth/status", function (req, res) {
+  var appUser = req.session.appUser;
+  if (!appUser) return res.json({ loggedIn: false });
+
+  var db = dbRead();
+  var account = db.accounts[appUser];
+  var igConnected = !!(account && account.igUsername);
+
+  return res.json({
+    loggedIn: true,
+    appUser: appUser,
+    email: req.session.email || "",
+    igConnected: igConnected,
+    igUsername: igConnected ? account.igUsername : null,
+    isPro: account ? (account.isPro || false) : false,
+  });
+});
+
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/auth/logout
+// ---------------------------------------------------------------
+app.post("/api/auth/logout", function (req, res) {
+  var appUser = req.session.appUser;
+  if (appUser) {
+    delete igSessions[appUser];
+    delete pendingLogins[appUser];
+    log("auth", "Logged out: " + appUser);
+  }
+  req.session.destroy(function () {});
+  return res.json({ success: true });
+});
+
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/ig/connect - Connect Instagram account
+// ---------------------------------------------------------------
+app.post("/api/ig/connect", async function (req, res) {
+  var appUser = req.session.appUser;
+  if (!appUser) return res.status(401).json({ error: "Not logged in" });
+
   var username = req.body.username;
   var password = req.body.password;
 
@@ -360,22 +468,23 @@ app.post("/api/login", async function(req, res) {
   }
 
   var clean = username.trim().toLowerCase().replace(/^@/, "");
-  var ig    = makeIgClient(clean);
+  var ig = makeIgClient(clean);
 
   try {
     await ig.simulate.preLoginFlow();
     var user = await ig.account.login(clean, password);
     try { await ig.simulate.postLoginFlow(); } catch (e) { /* non-fatal */ }
-    await finalizeLogin(ig, user, clean, req);
-    return res.json({ success: true, username: clean, fullName: user.full_name || "" });
+    await finalizeIgLogin(ig, user, clean, appUser, req);
+    return res.json({ success: true, igUsername: clean, fullName: user.full_name || "" });
 
   } catch (err) {
-    var errMsg  = (err.message || "").toLowerCase();
+    var errMsg = (err.message || "").toLowerCase();
     var errBody = {};
     try { errBody = err.response && err.response.body ? err.response.body : {}; } catch (e) {}
 
-    log("login", "Error for @" + clean + ": " + err.message);
+    log("ig-login", "Error for @" + clean + ": " + err.message);
 
+    // CHECKPOINT
     var isCheckpoint = (
       err instanceof IgCheckpointError ||
       errMsg.includes("checkpoint") ||
@@ -384,53 +493,40 @@ app.post("/api/login", async function(req, res) {
       errMsg.includes("help you get back") ||
       errMsg.includes("please wait a few minutes") ||
       (errBody && errBody.error_type === "checkpoint_required") ||
-      (errBody && errBody.message   === "checkpoint_required")
+      (errBody && errBody.message === "checkpoint_required")
     );
 
     if (isCheckpoint) {
-      log("login", "@" + clean + " triggered checkpoint");
+      log("ig-login", "@" + clean + " triggered checkpoint");
       var triggered = false;
 
       if (!triggered) {
-        try {
-          await ig.challenge.auto(true);
-          triggered = true;
-        } catch (e1) {
-          log("login", "challenge.auto failed: " + e1.message);
-        }
+        try { await ig.challenge.auto(true); triggered = true; }
+        catch (e1) { log("ig-login", "challenge.auto failed: " + e1.message); }
       }
-
       if (!triggered) {
-        try {
-          await ig.challenge.selectVerifyMethod("1");
-          triggered = true;
-        } catch (e2) {
-          log("login", "selectVerifyMethod(email) failed: " + e2.message);
-        }
+        try { await ig.challenge.selectVerifyMethod("1"); triggered = true; }
+        catch (e2) { log("ig-login", "selectVerifyMethod(email) failed: " + e2.message); }
       }
-
       if (!triggered) {
-        try {
-          await ig.challenge.selectVerifyMethod("0");
-          triggered = true;
-        } catch (e3) {
-          log("login", "selectVerifyMethod(sms) failed: " + e3.message);
-        }
+        try { await ig.challenge.selectVerifyMethod("0"); triggered = true; }
+        catch (e3) { log("ig-login", "selectVerifyMethod(sms) failed: " + e3.message); }
       }
 
       if (triggered) {
-        pendingLogins[clean] = { ig: ig, type: "checkpoint" };
+        pendingLogins[appUser] = { ig: ig, type: "checkpoint", igUsername: clean };
         return res.json({
-          status:  "checkpoint",
+          status: "checkpoint",
           message: "Instagram sent a verification code to your email or phone. Enter it below.",
         });
       } else {
         return res.status(403).json({
-          error: "Instagram is blocking this login. Please open the Instagram app, go to Settings -> Security -> Emails From Instagram, approve the login notification, then try again.",
+          error: "Instagram is blocking this login. Open the Instagram app, go to Settings > Security > Emails From Instagram, approve the login, then try again.",
         });
       }
     }
 
+    // TWO-FACTOR
     var isTwoFactor = (
       err instanceof IgLoginTwoFactorRequiredError ||
       errMsg.includes("two_factor") ||
@@ -439,24 +535,25 @@ app.post("/api/login", async function(req, res) {
     );
 
     if (isTwoFactor) {
-      log("login", "@" + clean + " requires 2FA");
+      log("ig-login", "@" + clean + " requires 2FA");
       var info = {};
       try { info = err.response.body.two_factor_info || {}; } catch (e) {}
 
       var methods = [];
-      if (info.totp_two_factor_on)     methods.push("totp");
-      if (info.sms_two_factor_on)      methods.push("sms");
+      if (info.totp_two_factor_on) methods.push("totp");
+      if (info.sms_two_factor_on) methods.push("sms");
       if (info.whatsapp_two_factor_on) methods.push("whatsapp");
-      if (methods.length === 0)        methods.push("sms");
+      if (methods.length === 0) methods.push("sms");
 
-      pendingLogins[clean] = { ig: ig, type: "twofactor", twoFactorInfo: info };
+      pendingLogins[appUser] = { ig: ig, type: "twofactor", twoFactorInfo: info, igUsername: clean };
       return res.json({ status: "twofactor", methods: methods });
     }
 
+    // BAD PASSWORD
     var isBadPassword = (
-      errMsg.includes("bad_password")  ||
-      errMsg.includes("invalid_user")  ||
-      errMsg.includes("incorrect")     ||
+      errMsg.includes("bad_password") ||
+      errMsg.includes("invalid_user") ||
+      errMsg.includes("incorrect") ||
       errMsg.includes("wrong password") ||
       (errBody && errBody.invalid_credentials === true)
     );
@@ -469,33 +566,30 @@ app.post("/api/login", async function(req, res) {
   }
 });
 
-// -------------------------------------------------------------
-//  ROUTE: POST /api/verify-checkpoint
-// -------------------------------------------------------------
-app.post("/api/verify-checkpoint", async function(req, res) {
-  var username = req.body.username;
-  var code     = req.body.code;
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/ig/verify-checkpoint
+// ---------------------------------------------------------------
+app.post("/api/ig/verify-checkpoint", async function (req, res) {
+  var appUser = req.session.appUser;
+  if (!appUser) return res.status(401).json({ error: "Not logged in" });
 
-  if (!username || !code) {
-    return res.status(400).json({ error: "Username and code are required." });
-  }
+  var code = req.body.code;
+  if (!code) return res.status(400).json({ error: "Code is required." });
 
-  var clean   = username.trim().toLowerCase().replace(/^@/, "");
-  var pending = pendingLogins[clean];
-
+  var pending = pendingLogins[appUser];
   if (!pending || pending.type !== "checkpoint") {
-    return res.status(400).json({ error: "No pending checkpoint. Please log in again." });
+    return res.status(400).json({ error: "No pending checkpoint. Please try again." });
   }
 
   try {
     var user = await pending.ig.challenge.sendSecurityCode(code.trim());
-    try { await pending.ig.simulate.postLoginFlow(); } catch (e) { /* non-fatal */ }
-    await finalizeLogin(pending.ig, user, clean, req);
-    log("auth", "@" + clean + " checkpoint verified");
-    return res.json({ success: true, username: clean, fullName: user.full_name || "" });
+    try { await pending.ig.simulate.postLoginFlow(); } catch (e) {}
+    await finalizeIgLogin(pending.ig, user, pending.igUsername, appUser, req);
+    log("auth", "@" + pending.igUsername + " checkpoint verified");
+    return res.json({ success: true, igUsername: pending.igUsername, fullName: user.full_name || "" });
   } catch (err) {
     var msg = (err.message || "").toLowerCase();
-    log("auth", "@" + clean + " checkpoint verify failed: " + err.message);
+    log("auth", "Checkpoint verify failed: " + err.message);
     if (msg.includes("wrong") || msg.includes("incorrect") || msg.includes("invalid") || msg.includes("400") || msg.includes("bad") || msg.includes("expired")) {
       return res.status(400).json({ error: "That code is incorrect or expired. Please try again." });
     }
@@ -503,49 +597,45 @@ app.post("/api/verify-checkpoint", async function(req, res) {
   }
 });
 
-// -------------------------------------------------------------
-//  ROUTE: POST /api/verify-2fa
-// -------------------------------------------------------------
-app.post("/api/verify-2fa", async function(req, res) {
-  var username = req.body.username;
-  var code     = req.body.code;
-  var method   = req.body.method;
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/ig/verify-2fa
+// ---------------------------------------------------------------
+app.post("/api/ig/verify-2fa", async function (req, res) {
+  var appUser = req.session.appUser;
+  if (!appUser) return res.status(401).json({ error: "Not logged in" });
 
-  if (!username || !code) {
-    return res.status(400).json({ error: "Username and code are required." });
-  }
+  var code = req.body.code;
+  var method = req.body.method;
+  if (!code) return res.status(400).json({ error: "Code is required." });
 
-  var clean   = username.trim().toLowerCase().replace(/^@/, "");
-  var pending = pendingLogins[clean];
-
+  var pending = pendingLogins[appUser];
   if (!pending || pending.type !== "twofactor") {
-    return res.status(400).json({ error: "No pending 2FA. Please log in again." });
+    return res.status(400).json({ error: "No pending 2FA. Please try again." });
   }
 
   try {
-    var ig            = pending.ig;
+    var ig = pending.ig;
     var twoFactorInfo = pending.twoFactorInfo || {};
 
     var verificationMethod = "1";
-    if (method === "totp")     verificationMethod = "0";
+    if (method === "totp") verificationMethod = "0";
     if (method === "whatsapp") verificationMethod = "2";
 
     var user = await ig.account.twoFactorLogin({
-      username:            twoFactorInfo.username || clean,
-      verificationCode:    code.trim().replace(/\s+/g, ""),
+      username: twoFactorInfo.username || pending.igUsername,
+      verificationCode: code.trim().replace(/\s+/g, ""),
       twoFactorIdentifier: twoFactorInfo.two_factor_identifier || "",
-      verificationMethod:  verificationMethod,
-      trustThisDevice:     "1",
+      verificationMethod: verificationMethod,
+      trustThisDevice: "1",
     });
 
-    try { await ig.simulate.postLoginFlow(); } catch (e) { /* non-fatal */ }
-    await finalizeLogin(ig, user, clean, req);
-    log("auth", "@" + clean + " 2FA verified via " + method);
-    return res.json({ success: true, username: clean, fullName: user.full_name || "" });
-
+    try { await ig.simulate.postLoginFlow(); } catch (e) {}
+    await finalizeIgLogin(ig, user, pending.igUsername, appUser, req);
+    log("auth", "@" + pending.igUsername + " 2FA verified via " + method);
+    return res.json({ success: true, igUsername: pending.igUsername, fullName: user.full_name || "" });
   } catch (err) {
     var msg = (err.message || "").toLowerCase();
-    log("auth", "@" + clean + " 2FA failed: " + err.message);
+    log("auth", "2FA failed: " + err.message);
     if (msg.includes("wrong") || msg.includes("incorrect") || msg.includes("invalid") || msg.includes("400") || msg.includes("bad") || msg.includes("expired")) {
       return res.status(400).json({ error: "That code is incorrect or expired. Please try again." });
     }
@@ -553,36 +643,19 @@ app.post("/api/verify-2fa", async function(req, res) {
   }
 });
 
-// -------------------------------------------------------------
-//  ROUTE: POST /api/logout
-// -------------------------------------------------------------
-app.post("/api/logout", function(req, res) {
-  var username = req.session.username;
-  if (username) {
-    delete igSessions[username];
-    delete pendingLogins[username];
-    log("auth", "@" + username + " logged out");
-  }
-  req.session.destroy(function() {});
-  return res.json({ success: true });
-});
+// ---------------------------------------------------------------
+//  ROUTE: GET /api/sync (Server-Sent Events)
+// ---------------------------------------------------------------
+app.get("/api/sync", authMiddleware, async function (req, res) {
+  var appUser = req.appUser;
 
-// -------------------------------------------------------------
-//  ROUTE: GET /api/sync  (Server-Sent Events)
-// -------------------------------------------------------------
-app.get("/api/sync", async function(req, res) {
-  var username = req.session.username;
-  if (!username) {
-    return res.status(401).json({ error: "Not logged in" });
-  }
-
-  res.setHeader("Content-Type",  "text/event-stream");
+  res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection",    "keep-alive");
+  res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
-  var keepAlive = setInterval(function() {
+  var keepAlive = setInterval(function () {
     try { res.write(": ping\n\n"); } catch (e) { clearInterval(keepAlive); }
   }, 20000);
 
@@ -591,14 +664,14 @@ app.get("/api/sync", async function(req, res) {
   }
 
   try {
-    var result = await runSync(username, function(message, pct) {
+    var result = await runSync(appUser, function (message, pct) {
       send({ type: "progress", message: message, pct: pct });
     });
     send({ type: "done", result: result });
   } catch (err) {
     var errMsg = err.message || "Unknown error";
     if (errMsg === "SESSION_EXPIRED") {
-      send({ type: "error", message: "Session expired. Please sign out and log in again." });
+      send({ type: "error", message: "Instagram session expired. Please reconnect your account." });
     } else if (errMsg === "SYNC_IN_PROGRESS") {
       send({ type: "error", message: "A sync is already running. Please wait." });
     } else {
@@ -610,137 +683,150 @@ app.get("/api/sync", async function(req, res) {
   }
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  ROUTE: GET /api/data
-// -------------------------------------------------------------
-app.get("/api/data", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
-  var db      = dbRead();
-  var account = db.accounts[username];
+// ---------------------------------------------------------------
+app.get("/api/data", authMiddleware, function (req, res) {
+  var appUser = req.appUser;
+  var db = dbRead();
+  var account = db.accounts[appUser];
   if (!account) return res.status(404).json({ error: "Account not found" });
 
+  // Free tier: limit unfollowers to 5
+  var allUnfollowers = (account.unfollowers || []).filter(function (u) { return !u.dismissed; });
+  var isPro = account.isPro || false;
+  var visibleUnfollowers = isPro ? allUnfollowers : allUnfollowers.slice(0, 5);
+  var hiddenCount = isPro ? 0 : Math.max(0, allUnfollowers.length - 5);
+
   return res.json({
-    username:        account.username,
-    fullName:        account.fullName        || "",
-    profilePic:      account.profilePic      || "",
-    followerCount:   (account.currentFollowers || []).length,
-    unfollowers:     (account.unfollowers     || []).filter(function(u) { return !u.dismissed; }),
-    dismissedCount:  (account.unfollowers     || []).filter(function(u) { return  u.dismissed; }).length,
-    gainedFollowers: (account.gainedFollowers  || []).slice(-50).reverse(),
-    snapshots:       account.snapshots        || [],
-    lastChecked:     account.lastChecked      || null,
-    tracking:        account.tracking         || false,
-    isBaseline:      (account.currentFollowers || []).length === 0,
-    syncInProgress:  !!syncLocks[username],
+    igUsername: account.igUsername,
+    fullName: account.fullName || "",
+    profilePic: account.profilePic || "",
+    followerCount: (account.currentFollowers || []).length,
+    unfollowers: visibleUnfollowers,
+    totalUnfollowers: allUnfollowers.length,
+    hiddenUnfollowers: hiddenCount,
+    dismissedCount: (account.unfollowers || []).filter(function (u) { return u.dismissed; }).length,
+    gainedFollowers: (account.gainedFollowers || []).slice(-50).reverse(),
+    snapshots: account.snapshots || [],
+    lastChecked: account.lastChecked || null,
+    tracking: account.tracking || false,
+    isBaseline: (account.currentFollowers || []).length === 0,
+    syncInProgress: !!syncLocks[appUser],
+    isPro: isPro,
   });
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  ROUTE: POST /api/dismiss/:pk
-// -------------------------------------------------------------
-app.post("/api/dismiss/:pk", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
-  var db      = dbRead();
-  var account = db.accounts[username];
+// ---------------------------------------------------------------
+app.post("/api/dismiss/:pk", authMiddleware, function (req, res) {
+  var db = dbRead();
+  var account = db.accounts[req.appUser];
   if (!account) return res.status(404).json({ error: "Not found" });
 
-  var entry = (account.unfollowers || []).find(function(u) { return u.pk === req.params.pk; });
+  var entry = (account.unfollowers || []).find(function (u) { return u.pk === req.params.pk; });
   if (entry) entry.dismissed = true;
   dbWrite(db);
   return res.json({ success: true });
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  ROUTE: POST /api/dismiss-all
-// -------------------------------------------------------------
-app.post("/api/dismiss-all", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
-  var db      = dbRead();
-  var account = db.accounts[username];
+// ---------------------------------------------------------------
+app.post("/api/dismiss-all", authMiddleware, function (req, res) {
+  var db = dbRead();
+  var account = db.accounts[req.appUser];
   if (!account) return res.status(404).json({ error: "Not found" });
 
-  (account.unfollowers || []).forEach(function(u) { u.dismissed = true; });
+  (account.unfollowers || []).forEach(function (u) { u.dismissed = true; });
   dbWrite(db);
   return res.json({ success: true });
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  ROUTE: POST /api/clear-data
-// -------------------------------------------------------------
-app.post("/api/clear-data", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
-  var db      = dbRead();
-  var account = db.accounts[username];
+// ---------------------------------------------------------------
+app.post("/api/clear-data", authMiddleware, function (req, res) {
+  var db = dbRead();
+  var account = db.accounts[req.appUser];
   if (!account) return res.status(404).json({ error: "Not found" });
 
   account.currentFollowers = [];
-  account.unfollowers      = [];
-  account.gainedFollowers  = [];
-  account.snapshots        = [];
-  account.tracking         = false;
-  account.lastChecked      = null;
+  account.unfollowers = [];
+  account.gainedFollowers = [];
+  account.snapshots = [];
+  account.tracking = false;
+  account.lastChecked = null;
   dbWrite(db);
-  log("data", "@" + username + " cleared all data");
+  log("data", req.appUser + " cleared all data");
   return res.json({ success: true });
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  ROUTE: DELETE /api/delete-account
-// -------------------------------------------------------------
-app.delete("/api/delete-account", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
+// ---------------------------------------------------------------
+app.delete("/api/delete-account", authMiddleware, function (req, res) {
+  var appUser = req.appUser;
   var db = dbRead();
-  delete db.accounts[username];
-  if (db.spyTargets) delete db.spyTargets[username];
+  delete db.accounts[appUser];
+  if (db.spyTargets) delete db.spyTargets[appUser];
   dbWrite(db);
-
-  delete igSessions[username];
-  req.session.destroy(function() {});
-  log("data", "@" + username + " deleted their account and all data");
+  delete igSessions[appUser];
+  req.session.destroy(function () {});
+  log("data", appUser + " deleted their account and all data");
   return res.json({ success: true });
 });
 
-// -------------------------------------------------------------
-//  ROUTE: POST /api/spy/add
-// -------------------------------------------------------------
-app.post("/api/spy/add", async function(req, res) {
-  var username   = req.session.username;
+// ---------------------------------------------------------------
+//  ROUTE: POST /api/activate-pro
+// ---------------------------------------------------------------
+app.post("/api/activate-pro", authMiddleware, function (req, res) {
+  var db = dbRead();
+  var account = db.accounts[req.appUser];
+  if (!account) return res.status(404).json({ error: "Not found" });
+  account.isPro = true;
+  dbWrite(db);
+  log("pro", req.appUser + " activated Pro");
+  return res.json({ success: true });
+});
+
+// ---------------------------------------------------------------
+//  SPY ROUTES
+// ---------------------------------------------------------------
+app.post("/api/spy/add", authMiddleware, async function (req, res) {
+  var appUser = req.appUser;
   var targetUser = (req.body.targetUser || "").trim().toLowerCase().replace(/^@/, "");
 
-  if (!username)   return res.status(401).json({ error: "Not logged in" });
   if (!targetUser) return res.status(400).json({ error: "Target username is required." });
 
-  var s = await rehydrate(username);
-  if (!s) return res.status(401).json({ error: "Session expired. Please log in again." });
+  // Check pro
+  var db = dbRead();
+  var account = db.accounts[appUser];
+  if (!account || !account.isPro) {
+    return res.status(403).json({ error: "Pro feature. Upgrade to use Spy mode." });
+  }
+
+  var s = await rehydrate(appUser);
+  if (!s) return res.status(401).json({ error: "Instagram session expired. Please reconnect." });
 
   try {
     var targetInfo = await s.ig.user.searchExact(targetUser);
     if (!targetInfo) return res.status(404).json({ error: "User @" + targetUser + " not found." });
 
     var targetId = String(targetInfo.pk);
-
-    var feed    = s.ig.feed.userFollowing(targetId);
+    var feed = s.ig.feed.userFollowing(targetId);
     var results = [];
-    var page    = 0;
+    var page = 0;
     do {
       var items = await feed.items();
       for (var i = 0; i < items.length; i++) {
         results.push({
-          pk:              String(items[i].pk),
-          username:        items[i].username        || "",
-          full_name:       items[i].full_name       || "",
+          pk: String(items[i].pk),
+          username: items[i].username || "",
+          full_name: items[i].full_name || "",
           profile_pic_url: items[i].profile_pic_url || "",
-          followedAt:      Date.now(),
+          followedAt: Date.now(),
         });
       }
       page++;
@@ -748,60 +834,58 @@ app.post("/api/spy/add", async function(req, res) {
       if (page > 100) break;
     } while (feed.isMoreAvailable());
 
-    var db = dbRead();
     if (!db.spyTargets) db.spyTargets = {};
-    if (!db.spyTargets[username]) db.spyTargets[username] = {};
+    if (!db.spyTargets[appUser]) db.spyTargets[appUser] = {};
 
-    var existing = db.spyTargets[username][targetUser];
-    var now      = Date.now();
+    var existing = db.spyTargets[appUser][targetUser];
+    var now = Date.now();
     var oneMonth = 30 * 24 * 60 * 60 * 1000;
 
     var newFollows = [];
     if (existing && existing.following) {
-      var oldPKs = new Set(existing.following.map(function(u) { return u.pk; }));
+      var oldPKs = new Set(existing.following.map(function (u) { return u.pk; }));
       newFollows = results
-        .filter(function(u) { return !oldPKs.has(u.pk); })
-        .map(function(u) { return Object.assign({}, u, { followedAt: now, followedAtFormatted: fmtDate(now) }); });
+        .filter(function (u) { return !oldPKs.has(u.pk); })
+        .map(function (u) { return Object.assign({}, u, { followedAt: now, followedAtFormatted: fmtDate(now) }); });
 
       var merged = (existing.recentFollows || [])
-        .filter(function(u) { return now - u.followedAt < oneMonth; })
+        .filter(function (u) { return now - u.followedAt < oneMonth; })
         .concat(newFollows);
 
       var seen = {};
-      merged = merged.filter(function(u) {
+      merged = merged.filter(function (u) {
         if (seen[u.pk]) return false;
         seen[u.pk] = true;
         return true;
       });
 
-      db.spyTargets[username][targetUser].following     = results;
-      db.spyTargets[username][targetUser].recentFollows = merged;
-      db.spyTargets[username][targetUser].lastChecked   = now;
-      db.spyTargets[username][targetUser].newThisCheck  = newFollows.length;
+      db.spyTargets[appUser][targetUser].following = results;
+      db.spyTargets[appUser][targetUser].recentFollows = merged;
+      db.spyTargets[appUser][targetUser].lastChecked = now;
+      db.spyTargets[appUser][targetUser].newThisCheck = newFollows.length;
     } else {
-      db.spyTargets[username][targetUser] = {
-        targetUser:    targetUser,
-        targetId:      targetId,
-        displayName:   targetInfo.full_name || targetUser,
-        profilePic:    targetInfo.profile_pic_url || "",
-        following:     results,
+      db.spyTargets[appUser][targetUser] = {
+        targetUser: targetUser,
+        targetId: targetId,
+        displayName: targetInfo.full_name || targetUser,
+        profilePic: targetInfo.profile_pic_url || "",
+        following: results,
         recentFollows: [],
-        lastChecked:   now,
-        addedAt:       now,
-        newThisCheck:  0,
+        lastChecked: now,
+        addedAt: now,
+        newThisCheck: 0,
       };
     }
 
     dbWrite(db);
-    log("spy", "@" + username + " tracking @" + targetUser + " (" + results.length + " following)");
+    log("spy", appUser + " tracking @" + targetUser + " (" + results.length + " following)");
     return res.json({
-      success:        true,
-      targetUser:     targetUser,
+      success: true,
+      targetUser: targetUser,
       followingCount: results.length,
-      recentFollows:  db.spyTargets[username][targetUser].recentFollows,
-      isBaseline:     !existing,
+      recentFollows: db.spyTargets[appUser][targetUser].recentFollows,
+      isBaseline: !existing,
     });
-
   } catch (err) {
     log("spy", "Error tracking @" + targetUser + ": " + err.message);
     if ((err.message || "").toLowerCase().includes("not found") || (err.message || "").includes("404")) {
@@ -811,85 +895,87 @@ app.post("/api/spy/add", async function(req, res) {
   }
 });
 
-// -------------------------------------------------------------
-//  ROUTE: GET /api/spy/list
-// -------------------------------------------------------------
-app.get("/api/spy/list", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
-  var db      = dbRead();
-  var targets = db.spyTargets && db.spyTargets[username] ? db.spyTargets[username] : {};
-  var now      = Date.now();
+app.get("/api/spy/list", authMiddleware, function (req, res) {
+  var db = dbRead();
+  var targets = db.spyTargets && db.spyTargets[req.appUser] ? db.spyTargets[req.appUser] : {};
+  var now = Date.now();
   var oneMonth = 30 * 24 * 60 * 60 * 1000;
 
-  var list = Object.values(targets).map(function(t) {
+  var list = Object.values(targets).map(function (t) {
     return {
-      targetUser:     t.targetUser,
-      displayName:    t.displayName,
-      profilePic:     t.profilePic,
+      targetUser: t.targetUser,
+      displayName: t.displayName,
+      profilePic: t.profilePic,
       followingCount: (t.following || []).length,
-      recentFollows:  (t.recentFollows || []).filter(function(u) { return now - u.followedAt < oneMonth; }),
-      lastChecked:    t.lastChecked,
-      addedAt:        t.addedAt,
+      recentFollows: (t.recentFollows || []).filter(function (u) { return now - u.followedAt < oneMonth; }),
+      lastChecked: t.lastChecked,
+      addedAt: t.addedAt,
     };
   });
 
   return res.json({ targets: list });
 });
 
-// -------------------------------------------------------------
-//  ROUTE: DELETE /api/spy/remove/:target
-// -------------------------------------------------------------
-app.delete("/api/spy/remove/:target", function(req, res) {
-  var username = req.session.username;
-  if (!username) return res.status(401).json({ error: "Not logged in" });
-
+app.delete("/api/spy/remove/:target", authMiddleware, function (req, res) {
   var db = dbRead();
-  if (db.spyTargets && db.spyTargets[username]) {
-    delete db.spyTargets[username][req.params.target];
+  if (db.spyTargets && db.spyTargets[req.appUser]) {
+    delete db.spyTargets[req.appUser][req.params.target];
     dbWrite(db);
   }
   return res.json({ success: true });
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
+//  ROUTE: GET /api/config - public config for frontend
+// ---------------------------------------------------------------
+app.get("/api/config", function (req, res) {
+  res.json({
+    supabaseUrl: SUPABASE_URL,
+    supabaseAnonKey: SUPABASE_ANON_KEY,
+  });
+});
+
+// ---------------------------------------------------------------
 //  CRON: auto-check all tracked accounts every 5 minutes
-// -------------------------------------------------------------
-cron.schedule("*/5 * * * *", async function() {
-  var db       = dbRead();
+// ---------------------------------------------------------------
+cron.schedule("*/5 * * * *", async function () {
+  var db = dbRead();
   var accounts = Object.entries(db.accounts);
 
   for (var i = 0; i < accounts.length; i++) {
-    var username = accounts[i][0];
-    var account  = accounts[i][1];
+    var appUser = accounts[i][0];
+    var account = accounts[i][1];
 
     if (!account.tracking) continue;
-    if (syncLocks[username]) {
-      log("cron", "@" + username + " sync already running, skipping");
+    if (!account.igUsername) continue;
+    if (syncLocks[appUser]) {
+      log("cron", appUser + " sync already running, skipping");
       continue;
     }
 
     try {
-      log("cron", "Checking @" + username);
-      var r = await runSync(username);
-      log("cron", "@" + username + ": " + r.followerCount + " followers | -" + r.newUnfollowers + " | +" + r.gained);
+      log("cron", "Checking " + appUser + " (@" + account.igUsername + ")");
+      var r = await runSync(appUser);
+      log("cron", "@" + account.igUsername + ": " + r.followerCount + " followers | -" + r.newUnfollowers + " | +" + r.gained);
     } catch (err) {
-      log("cron", "@" + username + " error: " + err.message);
+      log("cron", appUser + " error: " + err.message);
     }
 
     if (i < accounts.length - 1) await sleep(10000);
   }
 });
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------
 //  START SERVER
-// -------------------------------------------------------------
-app.listen(PORT, function() {
-  console.log("\n======================================");
+// ---------------------------------------------------------------
+app.listen(PORT, function () {
+  console.log("");
+  console.log("======================================");
   console.log("  FollowWatch is running!");
   console.log("  URL: http://localhost:" + PORT);
   console.log("  Proxy: " + (PROXY_URL ? "enabled" : "disabled"));
+  console.log("  Supabase: " + (SUPABASE_URL ? "configured" : "NOT configured"));
   console.log("  Auto-sync: every 5 minutes");
-  console.log("======================================\n");
+  console.log("======================================");
+  console.log("");
 });
