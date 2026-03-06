@@ -12,24 +12,24 @@ IgCheckpointError,
 IgLoginTwoFactorRequiredError,
 } = require(“instagram-private-api”);
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  CONFIG
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 const PORT      = process.env.PORT      || 3000;
 const DB_PATH   = path.join(__dirname, “db.json”);
 const PROXY_URL = process.env.PROXY_URL || null;
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  LOGGING
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 function log(tag, msg) {
 const t = new Date().toLocaleTimeString(“en-US”, { hour12: false });
 console.log(`[${t}] [${tag}] ${msg}`);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  UTILITIES
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 function sleep(ms) {
 return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
@@ -46,9 +46,9 @@ second: “2-digit”,
 });
 }
 
-// ─────────────────────────────────────────────────────────────
-//  DATABASE  — atomic writes prevent corruption
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
+//  DATABASE  - atomic writes prevent corruption
+// ———————————————————––
 function dbRead() {
 if (!fs.existsSync(DB_PATH)) {
 var blank = { accounts: {}, spyTargets: {} };
@@ -69,16 +69,16 @@ fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
 fs.renameSync(tmp, DB_PATH);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  IN-MEMORY STORES
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 var igSessions    = {};
 var pendingLogins = {};
 var syncLocks     = {};
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  IG CLIENT FACTORY
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 function makeIgClient(username) {
 var ig = new IgApiClient();
 ig.state.generateDevice(username);
@@ -89,9 +89,9 @@ log(“proxy”, “@” + username + “ routed through proxy”);
 return ig;
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  FETCH ALL FOLLOWERS  with retry + progress
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 async function fetchAllFollowers(ig, userId, onCount) {
 var feed    = ig.feed.accountFollowers(userId);
 var results = [];
@@ -138,9 +138,9 @@ if (page > 300) break;
 return results;
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  COMPARE FOLLOWERS
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 function compareFollowers(oldList, newList) {
 var newPKs = new Set(newList.map(function(u) { return u.pk; }));
 var oldPKs = new Set(oldList.map(function(u) { return u.pk; }));
@@ -169,9 +169,9 @@ followedAtFormatted: fmt,
 return { unfollowers: unfollowers, gained: gained };
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  FINALIZE LOGIN
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 async function finalizeLogin(ig, user, username, req) {
 var serialized = await ig.state.serialize();
 delete serialized.constants;
@@ -201,9 +201,9 @@ req.session.username = username;
 log(“auth”, “@” + username + “ logged in successfully”);
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  REHYDRATE SESSION FROM DISK
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 async function rehydrate(username) {
 if (igSessions[username]) return igSessions[username];
 
@@ -223,9 +223,9 @@ return null;
 }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  CORE SYNC
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 async function runSync(username, onProgress) {
 if (syncLocks[username]) {
 throw new Error(“SYNC_IN_PROGRESS”);
@@ -241,20 +241,20 @@ var s = await rehydrate(username);
 if (!s) throw new Error(“SESSION_EXPIRED”);
 
 ```
-notify("Connecting to Instagram…", 5);
+notify("Connecting to Instagram...", 5);
 
 var db      = dbRead();
 var account = db.accounts[username];
 if (!account) throw new Error("Account not found in database");
 
-notify("Fetching your followers…", 10);
+notify("Fetching your followers...", 10);
 
 var newFollowers = await fetchAllFollowers(s.ig, s.userId, function(count) {
   var pct = Math.min(10 + Math.floor(count / 5), 75);
-  notify("Fetching followers… " + count + " loaded", pct);
+  notify("Fetching followers... " + count + " loaded", pct);
 });
 
-notify("Comparing with previous snapshot…", 80);
+notify("Comparing with previous snapshot...", 80);
 
 var oldFollowers = account.currentFollowers || [];
 var isBaseline   = oldFollowers.length === 0;
@@ -310,9 +310,9 @@ delete syncLocks[username];
 }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  EXPRESS SETUP
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 var app = express();
 
 app.use(cors({ origin: true, credentials: true }));
@@ -325,9 +325,9 @@ saveUninitialized: false,
 cookie:            { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true },
 }));
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: GET /api/status
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.get(”/api/status”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.json({ loggedIn: false });
@@ -352,9 +352,9 @@ syncInProgress:  !!syncLocks[username],
 });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/login
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/login”, async function(req, res) {
 var username = req.body.username;
 var password = req.body.password;
@@ -431,7 +431,7 @@ if (isCheckpoint) {
     });
   } else {
     return res.status(403).json({
-      error: "Instagram is blocking this login. Please open the Instagram app, go to Settings → Security → Emails From Instagram, approve the login notification, then try again.",
+      error: "Instagram is blocking this login. Please open the Instagram app, go to Settings -> Security -> Emails From Instagram, approve the login notification, then try again.",
     });
   }
 }
@@ -476,9 +476,9 @@ return res.status(500).json({ error: "Login failed: " + (err.message || "Unknown
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/verify-checkpoint
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/verify-checkpoint”, async function(req, res) {
 var username = req.body.username;
 var code     = req.body.code;
@@ -510,9 +510,9 @@ return res.status(500).json({ error: “Verification failed: “ + err.message }
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/verify-2fa
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/verify-2fa”, async function(req, res) {
 var username = req.body.username;
 var code     = req.body.code;
@@ -562,9 +562,9 @@ return res.status(500).json({ error: “2FA failed: “ + err.message });
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/logout
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/logout”, function(req, res) {
 var username = req.session.username;
 if (username) {
@@ -576,9 +576,9 @@ req.session.destroy(function() {});
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: GET /api/sync  (Server-Sent Events)
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.get(”/api/sync”, async function(req, res) {
 var username = req.session.username;
 if (!username) {
@@ -619,9 +619,9 @@ res.end();
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: GET /api/data
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.get(”/api/data”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -646,9 +646,9 @@ syncInProgress:  !!syncLocks[username],
 });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/dismiss/:pk
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/dismiss/:pk”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -663,9 +663,9 @@ dbWrite(db);
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/dismiss-all
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/dismiss-all”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -679,9 +679,9 @@ dbWrite(db);
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/clear-data
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/clear-data”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -701,9 +701,9 @@ log(“data”, “@” + username + “ cleared all data”);
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: DELETE /api/delete-account
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.delete(”/api/delete-account”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -719,9 +719,9 @@ log(“data”, “@” + username + “ deleted their account and all data”);
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: POST /api/spy/add
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.post(”/api/spy/add”, async function(req, res) {
 var username   = req.session.username;
 var targetUser = (req.body.targetUser || “”).trim().toLowerCase().replace(/^@/, “”);
@@ -822,9 +822,9 @@ return res.status(500).json({ error: “Could not fetch data for @” + targetUs
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: GET /api/spy/list
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.get(”/api/spy/list”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -849,9 +849,9 @@ addedAt:        t.addedAt,
 return res.json({ targets: list });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  ROUTE: DELETE /api/spy/remove/:target
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.delete(”/api/spy/remove/:target”, function(req, res) {
 var username = req.session.username;
 if (!username) return res.status(401).json({ error: “Not logged in” });
@@ -864,9 +864,9 @@ dbWrite(db);
 return res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  CRON: auto-check all tracked accounts every 5 minutes
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 cron.schedule(”*/5 * * * *”, async function() {
 var db       = dbRead();
 var accounts = Object.entries(db.accounts);
@@ -896,14 +896,14 @@ if (i < accounts.length - 1) await sleep(10000);
 }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 //  START SERVER
-// ─────────────────────────────────────────────────────────────
+// ———————————————————––
 app.listen(PORT, function() {
-console.log(”\n══════════════════════════════════════”);
+console.log(”\n======================================”);
 console.log(”  FollowWatch is running!”);
 console.log(”  URL: http://localhost:” + PORT);
 console.log(”  Proxy: “ + (PROXY_URL ? “enabled” : “disabled”));
 console.log(”  Auto-sync: every 5 minutes”);
-console.log(“══════════════════════════════════════\n”);
+console.log(”======================================\n”);
 });
