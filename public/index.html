@@ -818,7 +818,7 @@ body{
 // ---------------------------------------------------------------
 //  GLOBALS
 // ---------------------------------------------------------------
-var supabase = null;
+var sb = null;
 var appUser = "";
 var igUsername = "";
 var selM = "";
@@ -836,7 +836,7 @@ async function initSupabase() {
     var res = await fetch("/api/config");
     var cfg = await res.json();
     if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
-      supabase = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+      sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
       log("Supabase initialized");
     } else {
       log("Supabase not configured - running in dev mode");
@@ -939,9 +939,9 @@ async function doSignup() {
   btn.disabled = true; btn.textContent = "Creating account..."; setLoad("auth-bar", true);
 
   try {
-    if (!supabase) { showErr("auth-err", "Auth service not available. Try again."); return; }
+    if (!sb) { showErr("auth-err", "Auth service not available. Try again."); return; }
 
-    var result = await supabase.auth.signUp({ email: email, password: pass });
+    var result = await sb.auth.signUp({ email: email, password: pass });
     if (result.error) { showErr("auth-err", result.error.message); return; }
 
     var session = result.data.session;
@@ -1005,9 +1005,9 @@ async function doLogin() {
   btn.disabled = true; btn.textContent = "Logging in..."; setLoad("login-bar", true);
 
   try {
-    if (!supabase) { showErr("login-err", "Auth service not available."); return; }
+    if (!sb) { showErr("login-err", "Auth service not available."); return; }
 
-    var result = await supabase.auth.signInWithPassword({ email: email, password: pass });
+    var result = await sb.auth.signInWithPassword({ email: email, password: pass });
     if (result.error) { showErr("login-err", result.error.message); return; }
 
     var session = result.data.session;
@@ -1053,9 +1053,9 @@ document.getElementById("btn-google-signup").addEventListener("click", doGoogleA
 document.getElementById("btn-google-login").addEventListener("click", doGoogleAuth);
 
 async function doGoogleAuth() {
-  if (!supabase) { toast("Auth service not available", "error"); return; }
+  if (!sb) { toast("Auth service not available", "error"); return; }
   try {
-    var result = await supabase.auth.signInWithOAuth({
+    var result = await sb.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: window.location.origin },
     });
@@ -1069,9 +1069,9 @@ async function doGoogleAuth() {
 //  AUTH: Handle OAuth redirect
 // ---------------------------------------------------------------
 async function handleAuthRedirect() {
-  if (!supabase) return false;
+  if (!sb) return false;
   try {
-    var result = await supabase.auth.getSession();
+    var result = await sb.auth.getSession();
     if (result.data && result.data.session) {
       var session = result.data.session;
       var user = session.user;
@@ -1233,7 +1233,7 @@ async function verify2FA() {
 function doSignOut() {
   clearInterval(rTimer);
   fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(function() {});
-  if (supabase) supabase.auth.signOut().catch(function() {});
+  if (sb) sb.auth.signOut().catch(function() {});
   appUser = ""; igUsername = "";
   showAuthView("signup");
   showScreen("auth");
