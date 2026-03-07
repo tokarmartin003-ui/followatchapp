@@ -1,1473 +1,1026 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>FollowWatch</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;1,9..144,400;1,9..144,600;1,9..144,700&family=Albert+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#060606;--s1:#0c0c0c;--s2:#141414;--s3:#1c1c1c;
-  --bd:rgba(255,255,255,.07);--bd2:rgba(255,255,255,.14);
-  --tx:#f0ebe2;--tx2:#7a7468;--tx3:#383330;
-  --acc:#ff4d4d;--grn:#36f0a0;--gold:#f0c040;
-  --ig:linear-gradient(135deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);
-  --ig2:linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045);
+“use strict”;
+
+var express = require(“express”);
+var session = require(“express-session”);
+var cors = require(“cors”);
+var cron = require(“node-cron”);
+var path = require(“path”);
+var fs = require(“fs”);
+var igModule = require(“instagram-private-api”);
+var IgApiClient = igModule.IgApiClient;
+var IgCheckpointError = igModule.IgCheckpointError;
+var IgLoginTwoFactorRequiredError = igModule.IgLoginTwoFactorRequiredError;
+
+// —————————————————————
+//  CONFIG
+// —————————————————————
+var PORT = process.env.PORT || 3000;
+var DB_PATH = path.join(__dirname, “db.json”);
+var PROXY_URL = process.env.PROXY_URL || null;
+var SUPABASE_URL = process.env.SUPABASE_URL || “”;
+var SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || “”;
+var SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || “”;
+
+// —————————————————————
+//  LOGGING
+// —————————————————————
+function log(tag, msg) {
+var t = new Date().toLocaleTimeString(“en-US”, { hour12: false });
+console.log(”[” + t + “] [” + tag + “] “ + msg);
 }
-html{height:100%;-webkit-text-size-adjust:100%}
-body{
-  background:var(--bg);color:var(--tx);
-  font-family:'Albert Sans',sans-serif;
-  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
-  overflow-x:hidden;min-height:100%;
-  overscroll-behavior-y:none;
+
+// —————————————————————
+//  UTILITIES
+// —————————————————————
+function sleep(ms) {
+return new Promise(function (resolve) {
+setTimeout(resolve, ms);
+});
 }
-::-webkit-scrollbar{width:2px}
-::-webkit-scrollbar-thumb{background:var(--s3)}
-::selection{background:rgba(255,77,77,.22)}
 
-/* === SCREENS === */
-.screen{display:none}
-.screen.active{display:block;animation:sIn .28s cubic-bezier(.16,1,.3,1) both}
-@keyframes sIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-
-/* === AUTH SCREENS === */
-.auth-bg{
-  min-height:100vh;display:flex;align-items:center;justify-content:center;
-  padding:30px 22px;
-  background:radial-gradient(ellipse at 50% 0%,rgba(131,58,180,.06) 0%,transparent 60%);
+function fmtDate(ts) {
+return new Date(ts).toLocaleString(“en-US”, {
+weekday: “short”,
+month: “long”,
+day: “numeric”,
+year: “numeric”,
+hour: “2-digit”,
+minute: “2-digit”,
+second: “2-digit”,
+});
 }
-.auth-card{width:100%;max-width:360px}
 
-.logo{display:flex;align-items:center;gap:10px;margin-bottom:44px}
-.logo-mark{
-  width:34px;height:34px;border-radius:10px;background:var(--ig);
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;
-  box-shadow:0 6px 20px rgba(220,39,67,.3);
+// —————————————————————
+//  DATABASE - atomic writes prevent corruption
+// —————————————————————
+function dbRead() {
+if (!fs.existsSync(DB_PATH)) {
+var blank = { accounts: {}, spyTargets: {} };
+fs.writeFileSync(DB_PATH, JSON.stringify(blank, null, 2));
+return blank;
 }
-.logo-word{font-family:'Fraunces',serif;font-size:17px;font-weight:700;letter-spacing:-.2px}
-
-.auth-kicker{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--tx3);margin-bottom:12px}
-.auth-hed{font-family:'Fraunces',serif;font-style:italic;font-size:36px;font-weight:700;letter-spacing:-.8px;line-height:1.08;margin-bottom:9px}
-.auth-sub{font-size:14px;color:var(--tx2);line-height:1.6;margin-bottom:28px}
-
-.field{margin-bottom:9px}
-.field input{
-  width:100%;background:var(--s1);border:1px solid var(--bd);
-  border-radius:12px;padding:14px 16px;
-  color:var(--tx);font-size:15px;font-family:'Albert Sans',sans-serif;
-  outline:none;transition:border-color .2s,box-shadow .2s;
+try {
+return JSON.parse(fs.readFileSync(DB_PATH, “utf8”));
+} catch (e) {
+log(“db”, “Read error, returning blank: “ + e.message);
+return { accounts: {}, spyTargets: {} };
 }
-.field input:focus{border-color:var(--bd2);box-shadow:0 0 0 3px rgba(240,235,226,.05)}
-.field input::placeholder{color:var(--tx3)}
-
-.btn-primary{
-  width:100%;padding:14px;
-  background:var(--tx);border:none;border-radius:12px;
-  color:#000;font-size:14px;font-weight:600;font-family:'Albert Sans',sans-serif;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;
-  transition:opacity .15s,transform .12s;
-  box-shadow:0 4px 18px rgba(240,235,226,.1);
 }
-.btn-primary:hover:not(:disabled){opacity:.88;transform:translateY(-1px)}
-.btn-primary:active:not(:disabled){transform:scale(.97)}
-.btn-primary:disabled{opacity:.2;cursor:not-allowed;box-shadow:none}
 
-.btn-google{
-  width:100%;padding:14px;margin-bottom:9px;
-  background:var(--s1);border:1px solid var(--bd);border-radius:12px;
-  color:var(--tx);font-size:14px;font-weight:500;font-family:'Albert Sans',sans-serif;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;
-  transition:border-color .2s,transform .12s;
+function dbWrite(data) {
+var tmp = DB_PATH + “.tmp”;
+fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+fs.renameSync(tmp, DB_PATH);
 }
-.btn-google:hover{border-color:var(--bd2);transform:translateY(-1px)}
-.btn-google:active{transform:scale(.97)}
-.btn-google svg{flex-shrink:0}
 
-.btn-ig{
-  width:100%;padding:14px;
-  background:var(--ig2);border:none;border-radius:12px;
-  color:#fff;font-size:14px;font-weight:600;font-family:'Albert Sans',sans-serif;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;
-  transition:opacity .15s,transform .12s;
-  box-shadow:0 6px 28px rgba(131,58,180,.28);
+// —————————————————————
+//  IN-MEMORY STORES
+// —————————————————————
+var igSessions = {};
+var pendingLogins = {};
+var syncLocks = {};
+
+// —————————————————————
+//  IG CLIENT FACTORY
+// —————————————————————
+function makeIgClient(username) {
+var ig = new IgApiClient();
+ig.state.generateDevice(username);
+if (PROXY_URL) {
+ig.state.proxyUrl = PROXY_URL;
+log(“proxy”, “@” + username + “ routed through proxy”);
 }
-.btn-ig:hover:not(:disabled){opacity:.85;transform:translateY(-1px)}
-.btn-ig:active:not(:disabled){transform:scale(.97)}
-.btn-ig:disabled{opacity:.18;cursor:not-allowed;box-shadow:none}
-
-.btn-white{
-  width:100%;padding:14px;background:var(--tx);border:none;border-radius:12px;
-  color:#000;font-size:14px;font-weight:600;font-family:'Albert Sans',sans-serif;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;
-  transition:opacity .15s,transform .12s;
+return ig;
 }
-.btn-white:hover:not(:disabled){opacity:.88}
-.btn-white:active:not(:disabled){transform:scale(.97)}
-.btn-white:disabled{opacity:.25;cursor:not-allowed}
 
-.divider-or{display:flex;align-items:center;gap:14px;margin:18px 0}
-.divider-or span{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx3);letter-spacing:.6px;text-transform:uppercase;flex-shrink:0}
-.divider-or::before,.divider-or::after{content:'';flex:1;height:1px;background:var(--bd)}
+// —————————————————————
+//  FETCH ALL FOLLOWERS with retry + progress
+// —————————————————————
+async function fetchAllFollowers(ig, userId, onCount) {
+var feed = ig.feed.accountFollowers(userId);
+var results = [];
+var page = 0;
 
-.load-bar{height:1px;background:var(--s3);margin-top:14px;overflow:hidden;display:none}
-.load-fill{height:100%;width:30%;background:var(--ig2);animation:sweep 1.1s ease-in-out infinite}
-@keyframes sweep{0%{transform:translateX(-200%)}100%{transform:translateX(450%)}}
-
-.err{margin-top:12px;padding:12px 14px;background:rgba(255,77,77,.06);border:1px solid rgba(255,77,77,.18);border-radius:10px;color:var(--acc);font-size:13px;line-height:1.5;display:none}
-.note{margin-top:20px;padding:13px;background:var(--s1);border:1px solid var(--bd);border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx3);line-height:1.75}
-
-.auth-toggle{text-align:center;margin-top:22px;font-size:13px;color:var(--tx2)}
-.auth-toggle a{color:var(--tx);text-decoration:none;font-weight:600;cursor:pointer}
-.auth-toggle a:hover{text-decoration:underline}
-
-.back-btn{display:inline-flex;align-items:center;gap:7px;color:var(--tx2);font-size:13px;cursor:pointer;background:none;border:none;font-family:'Albert Sans',sans-serif;padding:0;margin-bottom:28px;transition:color .15s}
-.back-btn:hover{color:var(--tx)}
-.v-icon{width:50px;height:50px;background:var(--s1);border:1px solid var(--bd);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:18px}
-.v-title{font-family:'Fraunces',serif;font-size:22px;font-weight:700;font-style:italic;letter-spacing:-.3px;margin-bottom:6px}
-.v-sub{font-size:14px;color:var(--tx2);margin-bottom:24px;line-height:1.55}
-.method-list{display:flex;flex-direction:column;gap:7px;margin-bottom:20px}
-.method-btn{padding:13px 14px;background:var(--s1);border:1px solid var(--bd);border-radius:12px;color:var(--tx2);font-size:13px;font-family:'Albert Sans',sans-serif;cursor:pointer;text-align:left;display:flex;align-items:center;gap:12px;transition:all .15s;font-weight:500}
-.method-btn:hover{border-color:var(--bd2);background:var(--s2);color:var(--tx)}
-.method-btn.selected{border-color:rgba(240,235,226,.2);background:var(--s2);color:var(--tx)}
-.m-icon{font-size:18px;flex-shrink:0}
-.m-lbl{font-weight:600;font-size:13px}
-.m-sub{font-size:11px;color:var(--tx3);margin-top:2px}
-
-/* === IG CONNECT SCREEN === */
-.connect-card{
-  background:var(--s1);border:1px solid var(--bd);border-radius:18px;
-  padding:28px 22px;margin-bottom:14px;
+do {
+var items;
+var lastErr;
+for (var attempt = 1; attempt <= 3; attempt++) {
+try {
+items = await feed.items();
+lastErr = null;
+break;
+} catch (err) {
+lastErr = err;
+if (attempt < 3) {
+log(“fetch”, “Page “ + page + “ attempt “ + attempt + “ failed, retrying”);
+await sleep(attempt * 2000);
 }
-.connect-steps{display:flex;flex-direction:column;gap:14px;margin:22px 0}
-.cstep{display:flex;gap:12px;align-items:flex-start}
-.cstep-num{
-  width:24px;height:24px;border-radius:50%;background:var(--s3);
-  display:flex;align-items:center;justify-content:center;
-  font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx2);
-  flex-shrink:0;margin-top:1px;
 }
-.cstep-num.done{background:rgba(54,240,160,.12);color:var(--grn)}
-.cstep-txt{font-size:13px;color:var(--tx2);line-height:1.5}
-.cstep-txt strong{color:var(--tx);font-weight:600}
-
-/* === DASHBOARD === */
-#screen-main{min-height:100vh}
-.app{max-width:560px;margin:0 auto;padding:0 18px 120px}
-
-.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0 18px;margin-bottom:18px}
-.nav-l{display:flex;align-items:center;gap:11px}
-.ava{position:relative;width:36px;height:36px;flex-shrink:0}
-.ava-ring{position:absolute;inset:-2px;border-radius:50%;background:var(--ig)}
-.ava-face{position:absolute;inset:2px;border-radius:50%;background:var(--s2);display:flex;align-items:center;justify-content:center;font-family:'Fraunces',serif;font-style:italic;font-weight:700;font-size:14px;overflow:hidden;color:var(--tx)}
-.ava-face img{width:100%;height:100%;object-fit:cover;border-radius:50%}
-.nav-name{font-family:'Fraunces',serif;font-style:italic;font-size:15px;font-weight:700;letter-spacing:-.1px;line-height:1}
-.nav-meta{display:flex;align-items:center;gap:5px;margin-top:4px}
-.live{width:5px;height:5px;border-radius:50%;background:var(--grn);flex-shrink:0;animation:blink 2.2s ease-in-out infinite;box-shadow:0 0 7px var(--grn)}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
-.nav-status{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);letter-spacing:.4px;text-transform:lowercase}
-.btn-pro-nav{
-  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.6px;text-transform:uppercase;
-  background:rgba(240,192,64,.07);border:1px solid rgba(240,192,64,.18);
-  color:var(--gold);border-radius:20px;padding:6px 13px;cursor:pointer;
-  transition:all .2s;font-weight:500;
 }
-.btn-pro-nav:hover{background:rgba(240,192,64,.13);border-color:rgba(240,192,64,.3)}
+if (lastErr) throw lastErr;
 
-/* Stats */
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
-.stat{
-  background:var(--s1);border:1px solid var(--bd);border-radius:16px;
-  padding:15px 13px;cursor:default;
-  transition:border-color .2s,transform .18s;
+```
+for (var i = 0; i < items.length; i++) {
+  var u = items[i];
+  results.push({
+    pk: String(u.pk),
+    username: u.username || "",
+    full_name: u.full_name || "",
+    profile_pic_url: u.profile_pic_url || "",
+  });
 }
-.stat:hover{border-color:var(--bd2);transform:translateY(-2px)}
-.stat-n{
-  font-family:'Fraunces',serif;font-style:italic;font-weight:700;
-  font-size:28px;line-height:1;letter-spacing:-1px;margin-bottom:5px;
+
+page++;
+if (onCount) onCount(results.length);
+await sleep(page % 5 === 0 ? 2000 : 900);
+if (page > 300) break;
+```
+
+} while (feed.isMoreAvailable());
+
+return results;
 }
-.stat-n.r{color:var(--acc)}
-.stat-n.g{color:var(--grn)}
-.stat-n.w{color:var(--tx)}
-.stat-lbl{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);letter-spacing:.7px;text-transform:uppercase}
 
-/* Cards */
-.card{background:var(--s1);border:1px solid var(--bd);border-radius:16px;padding:14px 15px;margin-bottom:8px}
-.card-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+// —————————————————————
+//  COMPARE FOLLOWERS
+// —————————————————————
+function compareFollowers(oldList, newList) {
+var newPKs = new Set(newList.map(function (u) { return u.pk; }));
+var oldPKs = new Set(oldList.map(function (u) { return u.pk; }));
+var ts = Date.now();
+var fmt = fmtDate(ts);
 
-.sync-meta{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx3);letter-spacing:.3px}
-.btn-sync{
-  background:var(--tx);border:none;border-radius:9px;color:#000;
-  font-size:12px;font-weight:600;font-family:'Albert Sans',sans-serif;
-  padding:9px 15px;cursor:pointer;flex-shrink:0;
-  display:flex;align-items:center;gap:7px;
-  transition:all .15s;letter-spacing:-.1px;
+var unfollowers = oldList
+.filter(function (u) { return !newPKs.has(u.pk); })
+.map(function (u) {
+return Object.assign({}, u, {
+unfollowedAt: ts,
+unfollowedAtFormatted: fmt,
+dismissed: false,
+});
+});
+
+var gained = newList
+.filter(function (u) { return !oldPKs.has(u.pk); })
+.map(function (u) {
+return Object.assign({}, u, {
+followedAt: ts,
+followedAtFormatted: fmt,
+});
+});
+
+return { unfollowers: unfollowers, gained: gained };
 }
-.btn-sync:hover:not(:disabled){box-shadow:0 4px 18px rgba(240,235,226,.15)}
-.btn-sync:active:not(:disabled){transform:scale(.95)}
-.btn-sync:disabled{background:var(--s3);color:var(--tx3);cursor:not-allowed}
-.spin{width:10px;height:10px;border:1.5px solid rgba(0,0,0,.15);border-top-color:#000;border-radius:50%;animation:spin .55s linear infinite;display:none}
-@keyframes spin{to{transform:rotate(360deg)}}
-.prog-label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx3);margin-bottom:8px;letter-spacing:.3px}
-.prog-track{height:1px;background:var(--s3);overflow:hidden}
-.prog-fill{height:100%;background:var(--tx);width:0%;transition:width .4s ease}
 
-.tgl-name{font-size:13px;font-weight:500;color:var(--tx);letter-spacing:-.1px}
-.tgl-meta{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);margin-top:4px;letter-spacing:.5px;text-transform:uppercase}
-.pill{position:relative;width:38px;height:21px;background:var(--s3);border-radius:11px;cursor:pointer;border:1px solid var(--bd);transition:background .22s,border-color .22s;flex-shrink:0}
-.pill.on{background:var(--grn);border-color:var(--grn)}
-.pill::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:rgba(255,255,255,.4);transition:transform .22s cubic-bezier(.34,1.6,.64,1),background .22s}
-.pill.on::after{transform:translateX(17px);background:#000}
+// —————————————————————
+//  FINALIZE INSTAGRAM LOGIN
+// —————————————————————
+async function finalizeIgLogin(ig, user, igUsername, appUser, req) {
+var serialized = await ig.state.serialize();
+delete serialized.constants;
 
-/* Free tier wall */
-.paywall-blur{position:relative}
-.paywall-blur .pw-overlay{
-  position:absolute;bottom:0;left:0;right:0;height:120px;
-  background:linear-gradient(to bottom,transparent,var(--s1) 80%);
-  display:flex;align-items:flex-end;justify-content:center;padding-bottom:14px;
-  z-index:2;
+igSessions[appUser] = { ig: ig, userId: String(user.pk), igUsername: igUsername };
+delete pendingLogins[appUser];
+
+var db = dbRead();
+var existing = db.accounts[appUser] || {};
+
+db.accounts[appUser] = {
+appUser: appUser,
+igUsername: igUsername,
+userId: String(user.pk),
+fullName: user.full_name || existing.fullName || “”,
+profilePic: user.profile_pic_url || existing.profilePic || “”,
+currentFollowers: existing.currentFollowers || [],
+unfollowers: existing.unfollowers || [],
+gainedFollowers: existing.gainedFollowers || [],
+snapshots: existing.snapshots || [],
+tracking: existing.tracking || false,
+lastChecked: existing.lastChecked || null,
+sessionState: serialized,
+isPro: existing.isPro || false,
+};
+
+dbWrite(db);
+log(“auth”, “IG @” + igUsername + “ connected for app user “ + appUser);
 }
-.pw-overlay button{
-  background:var(--gold);border:none;border-radius:9px;color:#000;
-  font-size:12px;font-weight:700;font-family:'Albert Sans',sans-serif;
-  padding:9px 18px;cursor:pointer;transition:opacity .15s;
+
+// —————————————————————
+//  REHYDRATE IG SESSION FROM DISK
+//  FIX: if userId is missing from DB, fetch it live from Instagram
+//       and patch it back so future syncs don’t hit undefined/404.
+// —————————————————————
+async function rehydrate(appUser) {
+// Only return cached session if it actually has a userId
+if (igSessions[appUser] && igSessions[appUser].userId) {
+return igSessions[appUser];
 }
-.pw-overlay button:hover{opacity:.85}
-.hidden-count{
-  text-align:center;padding:12px;
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gold);
-  background:rgba(240,192,64,.04);border:1px solid rgba(240,192,64,.1);
-  border-radius:10px;margin-top:8px;cursor:pointer;transition:background .2s;
-}
-.hidden-count:hover{background:rgba(240,192,64,.08)}
 
-/* Pro banner */
-.pro-banner{background:rgba(240,192,64,.04);border:1px solid rgba(240,192,64,.1);border-radius:16px;padding:14px 15px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:12px}
-.pro-banner.gone{display:none}
-.pro-kicker{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);margin-bottom:4px}
-.pro-hed{font-size:13px;font-weight:600;color:var(--tx);letter-spacing:-.1px}
-.pro-sub{font-size:11px;color:var(--tx2);margin-top:2px}
-.btn-pro{background:var(--gold);border:none;border-radius:8px;color:#000;font-size:12px;font-weight:700;font-family:'Albert Sans',sans-serif;padding:9px 14px;cursor:pointer;flex-shrink:0;transition:opacity .15s,transform .12s}
-.btn-pro:hover{opacity:.85;transform:scale(1.03)}
-.btn-pro:active{transform:scale(.96)}
+var db = dbRead();
+var account = db.accounts[appUser];
+if (!account || !account.sessionState) return null;
 
-/* Chart */
-.chart-wrap{margin-bottom:18px;display:none}
-.chart-label{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);letter-spacing:.8px;text-transform:uppercase;margin-bottom:12px}
-.chart-bars{display:flex;align-items:flex-end;gap:5px;height:52px}
-.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;height:100%}
-.bar-fill{width:100%;border-radius:3px 3px 0 0;min-height:3px;align-self:flex-end;transition:height .3s ease}
-.bar-date{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--tx3)}
+try {
+var ig = makeIgClient(account.igUsername);
+await ig.state.deserialize(account.sessionState);
 
-/* === BOTTOM NAV === */
-.bottom-nav{
-  position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
-  background:rgba(12,12,12,.94);
-  backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
-  border:1px solid var(--bd2);border-radius:100px;
-  display:flex;align-items:center;gap:4px;padding:5px;
-  z-index:100;box-shadow:0 10px 40px rgba(0,0,0,.8),0 0 0 .5px rgba(255,255,255,.04);
-}
-.bnav-btn{
-  display:flex;align-items:center;justify-content:center;gap:7px;
-  padding:10px 22px;background:none;border:none;cursor:pointer;
-  color:var(--tx2);font-family:'Albert Sans',sans-serif;font-size:13px;font-weight:500;
-  border-radius:100px;transition:color .2s,background .2s;
-  -webkit-tap-highlight-color:transparent;white-space:nowrap;
-  position:relative;
-}
-.bnav-icon{font-size:15px;transition:transform .28s cubic-bezier(.34,1.5,.64,1)}
-.bnav-btn.active{
-  background:var(--tx);color:#000;font-weight:600;
-  box-shadow:0 2px 12px rgba(0,0,0,.4);
-}
-.bnav-btn.active .bnav-icon{transform:scale(1.2) translateY(-1px)}
-.bnav-btn:not(.active):hover{color:var(--tx)}
+```
+var userId = account.userId;
 
-/* === PANELS === */
-.panel{display:none}
-.panel.active{display:block}
-.panel.from-right{animation:fromRight .3s cubic-bezier(.25,.46,.45,.94) both}
-.panel.from-left{animation:fromLeft .3s cubic-bezier(.25,.46,.45,.94) both}
-@keyframes fromRight{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
-@keyframes fromLeft{from{opacity:0;transform:translateX(-28px)}to{opacity:1;transform:none}}
-
-.sub-tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--bd);position:relative}
-.sub-tab{
-  padding:10px 0;margin-right:22px;background:none;border:none;
-  color:var(--tx3);font-size:13px;font-weight:500;font-family:'Albert Sans',sans-serif;
-  cursor:pointer;position:relative;transition:color .2s;
-  -webkit-tap-highlight-color:transparent;display:flex;align-items:center;gap:7px;
-}
-.sub-tab.active{color:var(--tx)}
-.sub-tab::after{
-  content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;
-  background:var(--tx);transform:scaleX(0);transform-origin:left;
-  transition:transform .25s cubic-bezier(.4,0,.2,1);
-}
-.sub-tab.active::after{transform:scaleX(1)}
-
-.stab-badge{
-  font-family:'JetBrains Mono',monospace;font-size:9px;
-  padding:2px 6px;border-radius:5px;background:var(--s3);color:var(--tx3);
-  transition:background .2s,color .2s;font-weight:500;
-}
-.stab-badge.r{background:rgba(255,77,77,.12);color:var(--acc)}
-.stab-badge.g{background:rgba(54,240,160,.1);color:var(--grn)}
-
-.subpanel{display:none}
-.subpanel.active{display:block;animation:sIn .22s ease both}
-
-/* User list */
-.user-list{display:flex;flex-direction:column}
-.user-row{
-  display:flex;align-items:center;gap:12px;
-  padding:12px 0;border-bottom:1px solid rgba(255,255,255,.04);
-  animation:rowIn .32s ease both;
-}
-.user-row:last-child{border-bottom:none}
-@keyframes rowIn{from{opacity:0;transform:translateX(-7px)}to{opacity:1;transform:none}}
-
-.u-pic{width:38px;height:38px;border-radius:50%;background:var(--s2);display:flex;align-items:center;justify-content:center;font-family:'Fraunces',serif;font-style:italic;font-weight:700;font-size:13px;color:var(--tx3);flex-shrink:0;overflow:hidden}
-.u-pic img{width:100%;height:100%;object-fit:cover;border-radius:50%}
-.u-info{flex:1;min-width:0}
-.u-handle{font-size:14px;font-weight:500;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.1px}
-.u-name{font-size:11px;color:var(--tx3);margin-top:2px}
-.u-time{text-align:right;flex-shrink:0}
-.u-ago{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.2px}
-.u-ago.r{color:var(--acc)}
-.u-ago.g{color:var(--grn)}
-.u-date{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);margin-top:3px}
-.btn-x{background:none;border:1px solid var(--bd);color:var(--tx3);width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;font-size:13px;transition:all .15s}
-.btn-x:hover{border-color:var(--bd2);color:var(--tx2)}
-.panel-top{display:flex;justify-content:flex-end;margin-bottom:10px}
-.btn-dismiss{background:none;border:none;color:var(--tx3);font-size:12px;font-family:'Albert Sans',sans-serif;cursor:pointer;transition:color .15s;padding:0;font-weight:500}
-.btn-dismiss:hover{color:var(--tx2)}
-
-.empty{padding:48px 0;text-align:center}
-.empty-icon{font-size:30px;margin-bottom:12px;opacity:.3}
-.empty-txt{font-size:13px;color:var(--tx3);line-height:1.75}
-
-/* === MENU === */
-.menu-kicker{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--tx3);margin:20px 0 10px}
-.menu-item{
-  display:flex;align-items:center;justify-content:space-between;gap:12px;
-  background:var(--s1);border:1px solid var(--bd);border-radius:14px;
-  padding:13px 14px;margin-bottom:7px;cursor:pointer;
-  transition:border-color .18s,transform .15s;
-  -webkit-tap-highlight-color:transparent;
-}
-.menu-item:hover{border-color:var(--bd2)}
-.menu-item:active{transform:scale(.98)}
-.mi-l{display:flex;align-items:center;gap:12px;flex:1;min-width:0}
-.mi-icon{width:36px;height:36px;border-radius:10px;background:var(--s2);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;transition:transform .2s}
-.menu-item:hover .mi-icon{transform:scale(1.05)}
-.mi-name{font-size:13px;font-weight:600;color:var(--tx);letter-spacing:-.1px;margin-bottom:2px}
-.mi-sub{font-size:11px;color:var(--tx3);line-height:1.4}
-.mi-lock{
-  font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.4px;text-transform:uppercase;
-  background:rgba(240,192,64,.08);color:var(--gold);padding:3px 8px;border-radius:5px;
-  flex-shrink:0;border:1px solid rgba(240,192,64,.15);font-weight:500;
-}
-.mi-lock.on{background:rgba(54,240,160,.08);color:var(--grn);border-color:rgba(54,240,160,.15)}
-.mi-arr{color:var(--tx3);font-size:13px;flex-shrink:0}
-
-.priv-card{background:rgba(54,240,160,.03);border:1px solid rgba(54,240,160,.1);border-radius:14px;padding:15px;margin-bottom:4px;display:flex;gap:12px}
-.priv-led{width:6px;height:6px;border-radius:50%;background:var(--grn);flex-shrink:0;margin-top:4px;box-shadow:0 0 10px rgba(54,240,160,.6)}
-.priv-title{font-size:12px;font-weight:600;color:var(--grn);margin-bottom:4px;letter-spacing:-.1px}
-.priv-body{font-size:12px;color:var(--tx2);line-height:1.65}
-
-.divider{height:1px;background:var(--bd);margin:16px 0}
-
-.menu-item.danger{border-color:rgba(255,77,77,.1)}
-.menu-item.danger:hover{border-color:rgba(255,77,77,.22)}
-.menu-item.danger .mi-name{color:var(--acc)}
-
-.upgrade-card{
-  background:rgba(240,192,64,.03);border:1px solid rgba(240,192,64,.1);
-  border-radius:14px;padding:17px 15px;margin-bottom:7px;
-  cursor:pointer;transition:border-color .2s,transform .15s;
-}
-.upgrade-card:hover{border-color:rgba(240,192,64,.24);transform:translateY(-1px)}
-.upgrade-card:active{transform:scale(.98)}
-.up-kicker{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);margin-bottom:7px}
-.up-hed{font-family:'Fraunces',serif;font-style:italic;font-size:23px;font-weight:700;letter-spacing:-.4px;color:var(--tx);margin-bottom:5px}
-.up-sub{font-size:12px;color:var(--tx2);margin-bottom:14px;line-height:1.5}
-.up-btn{display:inline-flex;align-items:center;gap:7px;background:var(--gold);border:none;border-radius:8px;color:#000;font-size:13px;font-weight:700;font-family:'Albert Sans',sans-serif;padding:10px 16px;cursor:pointer;transition:opacity .15s}
-.up-btn:hover{opacity:.88}
-
-/* Spy */
-.spy-wrap{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-top:4px}
-.spy-kicker{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.8px;text-transform:uppercase;color:var(--tx3);margin-bottom:10px}
-.spy-row{display:flex;gap:8px}
-.spy-inp-wrap{flex:1;position:relative}
-.spy-at{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--tx3);font-size:14px}
-.spy-inp{width:100%;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:11px 12px 11px 26px;color:var(--tx);font-size:14px;font-family:'Albert Sans',sans-serif;outline:none;transition:border-color .2s}
-.spy-inp:focus{border-color:var(--bd2)}
-.spy-inp::placeholder{color:var(--tx3)}
-.btn-track{background:var(--tx);border:none;border-radius:10px;color:#000;font-size:13px;font-weight:600;font-family:'Albert Sans',sans-serif;padding:11px 16px;cursor:pointer;flex-shrink:0;transition:all .15s}
-.btn-track:hover:not(:disabled){opacity:.85}
-.btn-track:active:not(:disabled){transform:scale(.96)}
-.btn-track:disabled{opacity:.3;cursor:not-allowed}
-
-/* === MODALS === */
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:200;display:none;align-items:flex-end;justify-content:center}
-.overlay.open{display:flex;animation:dim .2s ease}
-@keyframes dim{from{opacity:0}to{opacity:1}}
-.modal{
-  width:100%;max-width:480px;
-  background:#0e0e0e;border:1px solid rgba(255,255,255,.08);
-  border-radius:22px 22px 0 0;padding:26px 20px 40px;
-  animation:rise .32s cubic-bezier(.34,1.1,.64,1) both;
-}
-@keyframes rise{from{transform:translateY(100%)}to{transform:none}}
-.modal-pull{width:32px;height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin:0 auto 22px}
-.modal-crown{font-family:'Fraunces',serif;font-size:36px;font-style:italic;text-align:center;margin-bottom:8px}
-.modal-title{font-family:'Fraunces',serif;font-size:23px;font-weight:700;font-style:italic;letter-spacing:-.5px;text-align:center;margin-bottom:6px}
-.modal-sub{font-size:13px;color:var(--tx2);text-align:center;margin-bottom:22px;line-height:1.5}
-.feat-list{display:flex;flex-direction:column;gap:10px;background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:15px;margin-bottom:20px}
-.feat-row{display:flex;gap:11px;align-items:flex-start}
-.feat-check{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--grn);flex-shrink:0;margin-top:2px}
-.feat-name{font-size:13px;font-weight:600;color:var(--tx);margin-bottom:2px;letter-spacing:-.1px}
-.feat-desc{font-size:11px;color:var(--tx3);line-height:1.45}
-.price-row{text-align:center;margin-bottom:18px}
-.price-num{font-family:'Fraunces',serif;font-style:italic;font-size:52px;font-weight:700;letter-spacing:-2px;color:var(--tx);line-height:1}
-.price-note{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tx3);margin-top:6px;letter-spacing:.3px;text-transform:uppercase}
-.btn-pay{width:100%;padding:15px;background:var(--tx);border:none;border-radius:12px;color:#000;font-size:15px;font-weight:700;font-family:'Albert Sans',sans-serif;cursor:pointer;transition:opacity .15s,transform .12s;letter-spacing:-.1px}
-.btn-pay:hover{opacity:.88;transform:translateY(-1px)}
-.btn-pay:active{transform:scale(.97)}
-.modal-later{width:100%;padding:12px;background:none;border:none;color:var(--tx3);font-size:13px;font-family:'Albert Sans',sans-serif;cursor:pointer;margin-top:8px;transition:color .15s}
-.modal-later:hover{color:var(--tx2)}
-
-/* === TOAST === */
-#toast{position:fixed;bottom:96px;left:50%;transform:translateX(-50%);z-index:300;border-radius:100px;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:nowrap;pointer-events:none;display:none;letter-spacing:.3px}
-#toast.show{display:block;animation:tIn .3s cubic-bezier(.34,1.3,.64,1) both}
-#toast.success{background:rgba(6,16,10,.96);border:1px solid rgba(54,240,160,.25);color:var(--grn);box-shadow:0 6px 30px rgba(0,0,0,.6)}
-#toast.warn{background:rgba(18,14,2,.96);border:1px solid rgba(240,192,64,.25);color:var(--gold);box-shadow:0 6px 30px rgba(0,0,0,.6)}
-#toast.error{background:rgba(16,2,2,.96);border:1px solid rgba(255,77,77,.25);color:var(--acc);box-shadow:0 6px 30px rgba(0,0,0,.6)}
-@keyframes tIn{from{opacity:0;transform:translateX(-50%) translateY(10px) scale(.94)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
-
-@media(max-width:420px){
-  .stats{grid-template-columns:1fr 1fr}
-  .stat:last-child{grid-column:span 2}
-  .u-time{display:none}
-}
-</style>
-</head>
-<body>
-
-<!-- ============================================================ -->
-<!--  SCREEN: SIGN UP / LOG IN (Supabase)                        -->
-<!-- ============================================================ -->
-<div id="screen-auth" class="screen active">
-  <div class="auth-bg">
-    <div class="auth-card">
-      <div class="logo">
-        <div class="logo-mark"><svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg></div>
-        <span class="logo-word">FollowWatch</span>
-      </div>
-
-      <!-- SIGN UP VIEW -->
-      <div id="auth-signup">
-        <div class="auth-kicker">Instagram Tracker</div>
-        <div class="auth-hed">Know who left.</div>
-        <div class="auth-sub">Create your free account to start tracking unfollowers in real time.</div>
-
-        <button class="btn-google" id="btn-google-signup">
-          <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-          Continue with Google
-        </button>
-
-        <div class="divider-or"><span>or</span></div>
-
-        <div class="field"><input type="email" id="inp-email" placeholder="Email address" autocomplete="email"/></div>
-        <div class="field"><input type="password" id="inp-password" placeholder="Password (min 6 characters)" autocomplete="new-password"/></div>
-        <button class="btn-primary" id="btn-signup">Create account</button>
-
-        <div class="load-bar" id="auth-bar"><div class="load-fill"></div></div>
-        <div class="err" id="auth-err"></div>
-
-        <div class="auth-toggle">Already have an account? <a onclick="showAuthView('login')">Log in</a></div>
-      </div>
-
-      <!-- LOG IN VIEW -->
-      <div id="auth-login" style="display:none">
-        <div class="auth-kicker">Welcome back</div>
-        <div class="auth-hed">Sign in.</div>
-        <div class="auth-sub">Log in to your FollowWatch account.</div>
-
-        <button class="btn-google" id="btn-google-login">
-          <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-          Continue with Google
-        </button>
-
-        <div class="divider-or"><span>or</span></div>
-
-        <div class="field"><input type="email" id="inp-email-login" placeholder="Email address" autocomplete="email"/></div>
-        <div class="field"><input type="password" id="inp-password-login" placeholder="Password" autocomplete="current-password"/></div>
-        <button class="btn-primary" id="btn-login">Log in</button>
-
-        <div class="load-bar" id="login-bar"><div class="load-fill"></div></div>
-        <div class="err" id="login-err"></div>
-
-        <div class="auth-toggle">Don't have an account? <a onclick="showAuthView('signup')">Sign up</a></div>
-      </div>
-
-      <div class="note" style="margin-top:28px">Your data is encrypted and never shared. Delete everything instantly, anytime.</div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!--  SCREEN: CONNECT INSTAGRAM                                   -->
-<!-- ============================================================ -->
-<div id="screen-connect" class="screen">
-  <div class="auth-bg">
-    <div class="auth-card">
-      <div class="logo">
-        <div class="logo-mark"><svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg></div>
-        <span class="logo-word">FollowWatch</span>
-      </div>
-
-      <div class="auth-kicker">Step 2</div>
-      <div class="auth-hed">Connect Instagram.</div>
-      <div class="auth-sub">Link your Instagram account to start tracking who unfollows you.</div>
-
-      <div class="connect-card">
-        <div class="connect-steps">
-          <div class="cstep"><div class="cstep-num done">1</div><div class="cstep-txt"><strong>Account created</strong> - you're in!</div></div>
-          <div class="cstep"><div class="cstep-num">2</div><div class="cstep-txt"><strong>Connect Instagram</strong> - enter your IG details below</div></div>
-          <div class="cstep"><div class="cstep-num">3</div><div class="cstep-txt"><strong>Start tracking</strong> - see who unfollows you</div></div>
-        </div>
-      </div>
-
-      <div class="field"><input type="text" id="inp-ig-user" placeholder="Instagram username" autocomplete="username" autocapitalize="none" spellcheck="false"/></div>
-      <div class="field"><input type="password" id="inp-ig-pass" placeholder="Instagram password" autocomplete="current-password"/></div>
-      <button class="btn-ig" id="btn-ig-connect">
-        <svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg>
-        Connect Instagram
-      </button>
-      <div class="load-bar" id="ig-bar"><div class="load-fill"></div></div>
-      <div class="err" id="ig-err"></div>
-      <div class="note">Your password goes directly to Instagram via secure connection. We only store a session token.</div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!--  SCREEN: CHECKPOINT                                          -->
-<!-- ============================================================ -->
-<div id="screen-checkpoint" class="screen">
-  <div class="auth-bg">
-    <div class="auth-card">
-      <button class="back-btn" id="back-cp"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg> Back</button>
-      <div class="v-icon">&#x1F510;</div>
-      <div class="v-title">Security check</div>
-      <div class="v-sub" id="cp-msg">Instagram sent you a code. Enter it below.</div>
-      <div class="field"><input type="text" id="inp-cp" placeholder="6-digit code" autocomplete="one-time-code" inputmode="numeric" maxlength="8"/></div>
-      <button class="btn-white" id="btn-cp">Verify &amp; continue</button>
-      <div class="load-bar" id="cp-bar"><div class="load-fill"></div></div>
-      <div class="err" id="cp-err"></div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!--  SCREEN: 2FA                                                 -->
-<!-- ============================================================ -->
-<div id="screen-2fa" class="screen">
-  <div class="auth-bg">
-    <div class="auth-card">
-      <button class="back-btn" id="back-2fa"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg> Back</button>
-      <div class="v-icon">&#x1F512;</div>
-      <div class="v-title">Two-factor auth</div>
-      <div class="v-sub">Choose how you want to receive your code.</div>
-      <div class="method-list" id="method-list"></div>
-      <div id="code-wrap" style="display:none">
-        <div class="field"><input type="text" id="inp-2fa" placeholder="Enter code" autocomplete="one-time-code" inputmode="numeric" maxlength="8"/></div>
-        <button class="btn-white" id="btn-2fa">Verify &amp; continue</button>
-      </div>
-      <div class="load-bar" id="tfa-bar"><div class="load-fill"></div></div>
-      <div class="err" id="tfa-err"></div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!--  SCREEN: DASHBOARD                                           -->
-<!-- ============================================================ -->
-<div id="screen-main" class="screen">
-  <div class="app">
-
-    <div class="nav">
-      <div class="nav-l">
-        <div class="ava"><div class="ava-ring"></div><div class="ava-face" id="ava-face"><span id="ava-letter">?</span></div></div>
-        <div>
-          <div class="nav-name" id="nav-name">---</div>
-          <div class="nav-meta"><span class="live"></span><span class="nav-status" id="nav-status">connecting</span></div>
-        </div>
-      </div>
-      <button class="btn-pro-nav" id="btn-upgrade-nav" onclick="openModal()">Pro</button>
-    </div>
-
-    <div class="stats">
-      <div class="stat"><div class="stat-n w" id="st-followers">---</div><div class="stat-lbl">Followers</div></div>
-      <div class="stat"><div class="stat-n r" id="st-unf">---</div><div class="stat-lbl">Left</div></div>
-      <div class="stat"><div class="stat-n g" id="st-gained">---</div><div class="stat-lbl">Gained</div></div>
-    </div>
-
-    <div class="card">
-      <div class="card-row">
-        <div class="sync-meta" id="sync-info">last checked: never</div>
-        <button class="btn-sync" id="btn-sync">
-          <div class="spin" id="spin"></div>
-          <svg id="sync-icon" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4-4.64 4.36A9 9 0 013.51 15"/></svg>
-          <span id="sync-label">Sync</span>
-        </button>
-      </div>
-      <div id="prog-wrap" style="display:none;margin-top:12px">
-        <div class="prog-label" id="prog-label">connecting...</div>
-        <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-row">
-        <div>
-          <div class="tgl-name">Auto-check every 5 min</div>
-          <div class="tgl-meta" id="toggle-sub">running</div>
-        </div>
-        <button class="pill on" id="pill"></button>
-      </div>
-    </div>
-
-    <!-- TRACKER PANEL -->
-    <div class="panel active" id="panel-tracker">
-      <div class="pro-banner" id="pro-banner">
-        <div>
-          <div class="pro-kicker">Pro</div>
-          <div class="pro-hed">Unlock everything</div>
-          <div class="pro-sub">Spy mode, CSV export, unlimited unfollowers &amp; more</div>
-        </div>
-        <button class="btn-pro" onclick="openModal()">Upgrade</button>
-      </div>
-      <div class="chart-wrap" id="chart-wrap">
-        <div class="chart-label">Follower trend</div>
-        <div class="chart-bars" id="chart-bars"></div>
-      </div>
-      <div class="sub-tabs">
-        <button class="sub-tab active" data-sub="unf">Unfollowers<span class="stab-badge r" id="tab-unf-n" style="display:none;margin-left:7px">0</span></button>
-        <button class="sub-tab" data-sub="gained">New followers<span class="stab-badge g" id="tab-gained-n" style="display:none;margin-left:7px">0</span></button>
-      </div>
-      <div class="subpanel active" id="panel-unf">
-        <div class="panel-top"><button class="btn-dismiss" id="btn-dismiss-all" style="display:none">Dismiss all</button></div>
-        <div class="user-list" id="unf-list">
-          <div class="empty"><div class="empty-icon">&#x1F4E1;</div><div class="empty-txt">Sync to start tracking.<br/>Unfollowers appear here instantly.</div></div>
-        </div>
-      </div>
-      <div class="subpanel" id="panel-gained">
-        <div class="user-list" id="gained-list">
-          <div class="empty"><div class="empty-icon">&#x1F465;</div><div class="empty-txt">New followers since your first sync<br/>will appear here.</div></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- MENU PANEL -->
-    <div class="panel" id="panel-menu">
-      <div class="priv-card">
-        <div class="priv-led"></div>
-        <div>
-          <div class="priv-title">Your data is yours</div>
-          <div class="priv-body">We never sell or share your data. Everything lives in your session only. Delete everything instantly at any time.</div>
-        </div>
-      </div>
-
-      <div class="menu-kicker">Pro Features</div>
-
-      <div class="menu-item" onclick="runNonFollowers()">
-        <div class="mi-l"><div class="mi-icon">&#x1F441;</div><div><div class="mi-name">Who doesn't follow back</div><div class="mi-sub">Everyone you follow who ignores you</div></div></div>
-        <span class="mi-lock" id="lock-nonfollowers">Pro</span>
-      </div>
-      <div class="menu-item" onclick="toggleSpySection()">
-        <div class="mi-l"><div class="mi-icon">&#x1F575;</div><div><div class="mi-name">Spy - track any account</div><div class="mi-sub">See who anyone followed in 30 days</div></div></div>
-        <span class="mi-lock" id="lock-spy">Pro</span>
-      </div>
-
-      <div id="spy-section" style="display:none">
-        <div class="spy-wrap">
-          <div id="spy-gate-menu" style="display:none">
-            <div class="empty" style="padding:24px 0"><div class="empty-icon">&#x1F575;</div><div class="empty-txt" style="margin-bottom:12px">Pro feature</div><button onclick="openModal()" style="background:var(--tx);border:none;border-radius:9px;color:#000;font-size:13px;font-weight:600;padding:9px 18px;cursor:pointer;font-family:'Albert Sans',sans-serif">Upgrade</button></div>
-          </div>
-          <div id="spy-ui" style="display:none">
-            <div class="spy-kicker">Track a user</div>
-            <div class="spy-row">
-              <div class="spy-inp-wrap"><span class="spy-at">@</span><input type="text" id="spy-input" class="spy-inp" placeholder="username" autocapitalize="none" spellcheck="false"/></div>
-              <button id="btn-spy-add" class="btn-track" onclick="spyAddUser()">Track</button>
-            </div>
-            <div id="spy-add-err" style="display:none;margin-top:9px;font-size:12px;color:var(--acc);font-family:'JetBrains Mono',monospace"></div>
-            <div id="spy-add-load" style="display:none;margin-top:9px;height:1px;background:var(--s3);overflow:hidden"><div style="height:100%;width:30%;background:var(--tx);animation:sweep 1.1s ease-in-out infinite"></div></div>
-            <div id="spy-targets-list" style="margin-top:10px"></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="menu-item" onclick="exportCSV()">
-        <div class="mi-l"><div class="mi-icon">&#x1F4E5;</div><div><div class="mi-name">Export to CSV</div><div class="mi-sub">Download your full unfollower history</div></div></div>
-        <span class="mi-lock" id="lock-csv">Pro</span>
-      </div>
-      <div class="menu-item" onclick="isPro?toast('Email alerts coming soon','warn'):openModal()">
-        <div class="mi-l"><div class="mi-icon">&#x1F4E7;</div><div><div class="mi-name">Email alerts</div><div class="mi-sub">Instant notification when someone unfollows</div></div></div>
-        <span class="mi-lock" id="lock-email">Pro</span>
-      </div>
-      <div class="menu-item" onclick="isPro?toast('Ghost detector coming soon','warn'):openModal()">
-        <div class="mi-l"><div class="mi-icon">&#x1F47B;</div><div><div class="mi-name">Ghost detector</div><div class="mi-sub">Followers who never like or comment</div></div></div>
-        <span class="mi-lock" id="lock-ghost">Pro</span>
-      </div>
-
-      <div id="menu-upgrade-section">
-        <div class="divider"></div>
-        <div class="upgrade-card" onclick="openModal()">
-          <div class="up-kicker">FollowWatch Pro</div>
-          <div class="up-hed">Unlock everything.</div>
-          <div class="up-sub">One-time payment. No subscription. Yours forever.</div>
-          <button class="up-btn">Upgrade now</button>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-      <div class="menu-kicker">Account &amp; Data</div>
-
-      <div class="menu-item" onclick="confirmClearData()">
-        <div class="mi-l"><div class="mi-icon">&#x1F5D1;</div><div><div class="mi-name">Clear all tracking data</div><div class="mi-sub">Wipes your follower history &amp; list</div></div></div>
-        <span class="mi-arr">&rarr;</span>
-      </div>
-      <div class="menu-item danger" onclick="confirmDeleteAccount()">
-        <div class="mi-l"><div class="mi-icon">&#x274C;</div><div><div class="mi-name">Delete account &amp; all data</div><div class="mi-sub">Permanently removes everything. Can't be undone.</div></div></div>
-        <span class="mi-arr" style="color:var(--acc)">&rarr;</span>
-      </div>
-      <div class="divider"></div>
-      <div class="menu-item" onclick="doSignOut()">
-        <div class="mi-l"><div class="mi-icon">&#x1F6AA;</div><div><div class="mi-name">Sign out</div><div class="mi-sub">You can sign back in anytime</div></div></div>
-        <span class="mi-arr">&rarr;</span>
-      </div>
-
-      <div style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--tx3);margin-top:28px;line-height:2;letter-spacing:.4px;text-transform:uppercase">
-        FollowWatch never sells your data.<br/>Delete everything instantly, anytime.
-      </div>
-    </div>
-  </div>
-
-  <nav class="bottom-nav">
-    <button class="bnav-btn active" data-tab="tracker"><span class="bnav-icon">&#x1F4E1;</span> Tracker</button>
-    <button class="bnav-btn" data-tab="menu"><span class="bnav-icon">&#x2630;</span> Menu</button>
-  </nav>
-</div>
-
-<!-- ============================================================ -->
-<!--  UPGRADE MODAL                                               -->
-<!-- ============================================================ -->
-<div class="overlay" id="overlay" onclick="closeModalOutside(event)">
-  <div class="modal">
-    <div class="modal-pull"></div>
-    <div class="modal-crown">&#x2726;</div>
-    <div class="modal-title">FollowWatch Pro</div>
-    <div class="modal-sub">Everything. Once. Yours forever.</div>
-    <div class="feat-list">
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Unlimited unfollower history</div><div class="feat-desc">Free tier shows 5 - Pro shows all</div></div></div>
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Who doesn't follow you back</div><div class="feat-desc">Every account you follow that ignores you</div></div></div>
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Spy on any public account</div><div class="feat-desc">See who anyone has followed in the last 30 days</div></div></div>
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Export to CSV</div><div class="feat-desc">Download your full unfollower history</div></div></div>
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Email alerts</div><div class="feat-desc">Instant notification the moment someone unfollows</div></div></div>
-      <div class="feat-row"><span class="feat-check">&#x2713;</span><div><div class="feat-name">Auto-tracking every 5 min</div><div class="feat-desc">Free tier is manual sync only</div></div></div>
-    </div>
-    <div class="price-row">
-      <div class="price-num" id="modal-price">&#xA3;10</div>
-      <div class="price-note">One-time - No subscription - Yours forever</div>
-    </div>
-    <a id="stripe-link" href="https://buy.stripe.com/eVqcN5gi5e0JdysgS91B600" target="_blank" style="text-decoration:none;display:block">
-      <button class="btn-pay" id="btn-pay-text">Upgrade to Pro</button>
-    </a>
-    <button class="modal-later" onclick="closeModal()">Maybe later</button>
-  </div>
-</div>
-
-<!-- ============================================================ -->
-<!--  CONFIRM MODAL                                               -->
-<!-- ============================================================ -->
-<div class="overlay" id="confirm-overlay" onclick="closeConfirmOutside(event)">
-  <div class="modal">
-    <div class="modal-pull"></div>
-    <div class="modal-crown" id="confirm-icon">&#x26A0;</div>
-    <div class="modal-title" id="confirm-title">Are you sure?</div>
-    <div class="modal-sub" id="confirm-msg">This cannot be undone.</div>
-    <button class="btn-pay" id="confirm-btn" style="background:var(--acc);color:#fff" onclick="runConfirmAction()">Confirm</button>
-    <button class="modal-later" onclick="closeConfirm()">Cancel</button>
-  </div>
-</div>
-
-<div id="toast"></div>
-
-<!-- ============================================================ -->
-<!--  SUPABASE CLIENT                                             -->
-<!-- ============================================================ -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-
-<script>
-// ---------------------------------------------------------------
-//  GLOBALS
-// ---------------------------------------------------------------
-var sb = null;
-var appUser = "";
-var igUsername = "";
-var selM = "";
-var isPro = false;
-var syncing = false;
-var tTimer = null;
-var rTimer = null;
-var curTab = "tracker";
-
-// ---------------------------------------------------------------
-//  INIT SUPABASE
-// ---------------------------------------------------------------
-async function initSupabase() {
+// userId missing - recover it live from Instagram and patch DB
+if (!userId) {
+  log("session", "@" + account.igUsername + " userId missing - fetching from Instagram");
   try {
-    var res = await fetch("/api/config");
-    var cfg = await res.json();
-    if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
-      sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
-      log("Supabase initialized");
-    } else {
-      log("Supabase not configured - running in dev mode");
-    }
-  } catch (e) {
-    log("Failed to init Supabase: " + e.message);
+    var currentUser = await ig.account.currentUser();
+    userId = String(currentUser.pk);
+    db.accounts[appUser].userId = userId;
+    dbWrite(db);
+    log("session", "@" + account.igUsername + " userId recovered: " + userId);
+  } catch (fetchErr) {
+    log("session", "@" + account.igUsername + " userId recovery failed: " + fetchErr.message);
+    return null;
   }
 }
 
-function log(msg) {
-  console.log("[FW] " + msg);
+igSessions[appUser] = { ig: ig, userId: userId, igUsername: account.igUsername };
+log("session", "IG @" + account.igUsername + " session restored from disk");
+return igSessions[appUser];
+```
+
+} catch (e) {
+log(“session”, “IG @” + account.igUsername + “ restore failed: “ + e.message);
+return null;
+}
 }
 
-// ---------------------------------------------------------------
-//  HELPERS
-// ---------------------------------------------------------------
-function showScreen(n) {
-  document.querySelectorAll(".screen").forEach(function(s) { s.classList.remove("active"); });
-  var e = document.getElementById("screen-" + n);
-  if (e) e.classList.add("active");
+// —————————————————————
+//  CORE SYNC
+// —————————————————————
+async function runSync(appUser, onProgress) {
+if (syncLocks[appUser]) {
+throw new Error(“SYNC_IN_PROGRESS”);
 }
-function toast(msg, type) {
-  var e = document.getElementById("toast");
-  e.textContent = msg;
-  e.className = "show " + (type || "success");
-  clearTimeout(tTimer);
-  tTimer = setTimeout(function() { e.className = ""; }, 3800);
-}
-function timeAgo(ts) {
-  if (!ts) return "never";
-  var s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 5) return "just now";
-  if (s < 60) return s + "s ago";
-  var m = Math.floor(s / 60);
-  if (m < 60) return m + "m ago";
-  var h = Math.floor(m / 60);
-  if (h < 24) return h + "h ago";
-  return Math.floor(h / 24) + "d ago";
-}
-function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
-function showEl(id) { var e = document.getElementById(id); if (e) e.style.display = ""; }
-function hideEl(id) { var e = document.getElementById(id); if (e) e.style.display = "none"; }
-function showErr(id, msg) { var e = document.getElementById(id); if (!e) return; e.textContent = msg || ""; e.style.display = msg ? "block" : "none"; }
-function setLoad(id, on) { var e = document.getElementById(id); if (e) e.style.display = on ? "block" : "none"; }
+syncLocks[appUser] = true;
 
-function showAuthView(view) {
-  if (view === "login") {
-    hideEl("auth-signup");
-    showEl("auth-login");
-    showErr("auth-err", "");
-    showErr("login-err", "");
-  } else {
-    showEl("auth-signup");
-    hideEl("auth-login");
-    showErr("auth-err", "");
-    showErr("login-err", "");
-  }
+function notify(msg, pct) {
+if (onProgress) onProgress(msg, pct);
 }
 
-// ---------------------------------------------------------------
-//  PRO STATE
-// ---------------------------------------------------------------
-function applyPro() {
-  var pb = document.getElementById("pro-banner");
-  var ub = document.getElementById("btn-upgrade-nav");
-  var us = document.getElementById("menu-upgrade-section");
-  var ll = document.querySelectorAll(".mi-lock");
-  if (isPro) {
-    if (pb) pb.classList.add("gone");
-    if (ub) ub.style.display = "none";
-    if (us) us.style.display = "none";
-    ll.forEach(function(l) { l.textContent = "On"; l.classList.add("on"); });
-  } else {
-    if (pb) pb.classList.remove("gone");
-    if (ub) ub.style.display = "";
-    if (us) us.style.display = "";
-    ll.forEach(function(l) { l.textContent = "Pro"; l.classList.remove("on"); });
-  }
+try {
+var s = await rehydrate(appUser);
+if (!s) throw new Error(“SESSION_EXPIRED”);
+
+```
+// Safety guard
+if (!s.userId) throw new Error("USER_ID_MISSING");
+
+notify("Connecting to Instagram...", 5);
+
+var db = dbRead();
+var account = db.accounts[appUser];
+if (!account) throw new Error("Account not found in database");
+
+notify("Fetching your followers...", 10);
+
+var newFollowers = await fetchAllFollowers(s.ig, s.userId, function (count) {
+  var pct = Math.min(10 + Math.floor(count / 5), 75);
+  notify("Fetching followers... " + count + " loaded", pct);
+});
+
+notify("Comparing with previous snapshot...", 80);
+
+var oldFollowers = account.currentFollowers || [];
+var isBaseline = oldFollowers.length === 0;
+
+var compared = isBaseline
+  ? { unfollowers: [], gained: [] }
+  : compareFollowers(oldFollowers, newFollowers);
+
+var newUnfollowers = compared.unfollowers;
+var gained = compared.gained;
+
+// Merge unfollowers
+var existingUMap = {};
+(account.unfollowers || []).forEach(function (u) { existingUMap[u.pk] = u; });
+newUnfollowers.forEach(function (u) {
+  if (!existingUMap[u.pk]) existingUMap[u.pk] = u;
+});
+var mergedUnfollowers = Object.values(existingUMap);
+
+// Merge gained followers - keep last 200
+var existingGMap = {};
+(account.gainedFollowers || []).forEach(function (u) { existingGMap[u.pk] = u; });
+gained.forEach(function (u) { existingGMap[u.pk] = u; });
+var mergedGained = Object.values(existingGMap).slice(-200);
+
+var ts = Date.now();
+account.currentFollowers = newFollowers;
+account.unfollowers = mergedUnfollowers;
+account.gainedFollowers = mergedGained;
+account.snapshots = (account.snapshots || []).slice(-49).concat([{
+  timestamp: ts,
+  count: newFollowers.length,
+  unfollowed: newUnfollowers.length,
+  gained: gained.length,
+}]);
+account.lastChecked = ts;
+account.tracking = true;
+
+dbWrite(db);
+notify("Done!", 100);
+
+log("sync", "@" + account.igUsername + ": " + newFollowers.length + " followers | -" + newUnfollowers.length + " unfollowed | +" + gained.length + " gained");
+
+return {
+  isBaseline: isBaseline,
+  followerCount: newFollowers.length,
+  newUnfollowers: newUnfollowers.length,
+  gained: gained.length,
+  totalUnfollowers: mergedUnfollowers.filter(function (u) { return !u.dismissed; }).length,
+};
+```
+
+} finally {
+delete syncLocks[appUser];
+}
 }
 
-function openModal() { document.getElementById("overlay").classList.add("open"); document.body.style.overflow = "hidden"; }
-function closeModal() { document.getElementById("overlay").classList.remove("open"); document.body.style.overflow = ""; }
-function closeModalOutside(e) { if (e.target === document.getElementById("overlay")) closeModal(); }
-
-// ---------------------------------------------------------------
-//  AUTH: SIGN UP WITH EMAIL
-// ---------------------------------------------------------------
-document.getElementById("btn-signup").addEventListener("click", doSignup);
-document.getElementById("inp-password").addEventListener("keydown", function(e) { if (e.key === "Enter") doSignup(); });
-
-async function doSignup() {
-  var email = document.getElementById("inp-email").value.trim();
-  var pass = document.getElementById("inp-password").value;
-  showErr("auth-err", "");
-
-  if (!email || !pass) { showErr("auth-err", "Please enter your email and password."); return; }
-  if (pass.length < 6) { showErr("auth-err", "Password must be at least 6 characters."); return; }
-
-  var btn = document.getElementById("btn-signup");
-  btn.disabled = true; btn.textContent = "Creating account..."; setLoad("auth-bar", true);
-
-  try {
-    if (!sb) { showErr("auth-err", "Auth service not available. Try again."); return; }
-
-    var result = await sb.auth.signUp({ email: email, password: pass });
-    if (result.error) { showErr("auth-err", result.error.message); return; }
-
-    var session = result.data.session;
-    var user = result.data.user;
-
-    if (!session) {
-      // Email confirmation required
-      showErr("auth-err", "");
-      toast("Check your email to confirm your account!", "success");
-      showAuthView("login");
-      return;
-    }
-
-    // Auto-confirmed - log in to our server
-    var serverRes = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ token: session.access_token, email: email, userId: user.id }),
-    });
-    var serverData = await serverRes.json();
-    setLoad("auth-bar", false);
-
-    if (serverData.success) {
-      appUser = serverData.appUser;
-      if (serverData.igConnected) {
-        igUsername = serverData.igUsername;
-        await loadDB();
-        showScreen("main");
-        applyPro();
-        toast("Welcome back!", "success");
-      } else {
-        showScreen("connect");
-        toast("Account created! Now connect Instagram.", "success");
-      }
-    } else {
-      showErr("auth-err", serverData.error || "Server error.");
-    }
-  } catch (e) {
-    setLoad("auth-bar", false);
-    showErr("auth-err", "Cannot reach server. Try again.");
-  } finally {
-    btn.disabled = false; btn.textContent = "Create account";
-  }
+// —————————————————————
+//  SUPABASE AUTH MIDDLEWARE
+// —————————————————————
+async function verifySupabaseToken(token) {
+if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+log(“auth”, “Supabase not configured”);
+return null;
 }
+try {
+var https = require(“https”);
+var http = require(“http”);
+var url = new URL(SUPABASE_URL + “/auth/v1/user”);
+var mod = url.protocol === “https:” ? https : http;
 
-// ---------------------------------------------------------------
-//  AUTH: LOG IN WITH EMAIL
-// ---------------------------------------------------------------
-document.getElementById("btn-login").addEventListener("click", doLogin);
-document.getElementById("inp-password-login").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });
-
-async function doLogin() {
-  var email = document.getElementById("inp-email-login").value.trim();
-  var pass = document.getElementById("inp-password-login").value;
-  showErr("login-err", "");
-
-  if (!email || !pass) { showErr("login-err", "Please enter your email and password."); return; }
-
-  var btn = document.getElementById("btn-login");
-  btn.disabled = true; btn.textContent = "Logging in..."; setLoad("login-bar", true);
-
-  try {
-    if (!sb) { showErr("login-err", "Auth service not available."); return; }
-
-    var result = await sb.auth.signInWithPassword({ email: email, password: pass });
-    if (result.error) { showErr("login-err", result.error.message); return; }
-
-    var session = result.data.session;
-    var user = result.data.user;
-
-    var serverRes = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ token: session.access_token, email: email, userId: user.id }),
-    });
-    var serverData = await serverRes.json();
-    setLoad("login-bar", false);
-
-    if (serverData.success) {
-      appUser = serverData.appUser;
-      isPro = serverData.isPro || false;
-      if (serverData.igConnected) {
-        igUsername = serverData.igUsername;
-        await loadDB();
-        showScreen("main");
-        applyPro();
-        toast("Welcome back, @" + igUsername + "!", "success");
-        setTimeout(doSync, 800);
-      } else {
-        showScreen("connect");
-      }
-    } else {
-      showErr("login-err", serverData.error || "Server error.");
-    }
-  } catch (e) {
-    setLoad("login-bar", false);
-    showErr("login-err", "Cannot reach server.");
-  } finally {
-    btn.disabled = false; btn.textContent = "Log in";
-  }
-}
-
-// ---------------------------------------------------------------
-//  AUTH: GOOGLE
-// ---------------------------------------------------------------
-document.getElementById("btn-google-signup").addEventListener("click", doGoogleAuth);
-document.getElementById("btn-google-login").addEventListener("click", doGoogleAuth);
-
-async function doGoogleAuth() {
-  if (!sb) { toast("Auth service not available", "error"); return; }
-  try {
-    var result = await sb.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin },
-    });
-    if (result.error) { toast(result.error.message, "error"); }
-  } catch (e) {
-    toast("Google sign-in failed", "error");
-  }
-}
-
-// ---------------------------------------------------------------
-//  AUTH: Handle OAuth redirect
-// ---------------------------------------------------------------
-async function handleAuthRedirect() {
-  if (!sb) return false;
-  try {
-    var result = await sb.auth.getSession();
-    if (result.data && result.data.session) {
-      var session = result.data.session;
-      var user = session.user;
-
-      var serverRes = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ token: session.access_token, email: user.email || "", userId: user.id }),
-      });
-      var serverData = await serverRes.json();
-
-      if (serverData.success) {
-        appUser = serverData.appUser;
-        isPro = serverData.isPro || false;
-        if (serverData.igConnected) {
-          igUsername = serverData.igUsername;
-          await loadDB();
-          showScreen("main");
-          applyPro();
-          toast("Welcome back, @" + igUsername + "!", "success");
-          setTimeout(doSync, 800);
+```
+return new Promise(function (resolve) {
+  var req = mod.request(url, {
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "apikey": SUPABASE_ANON_KEY,
+    },
+  }, function (res) {
+    var body = "";
+    res.on("data", function (chunk) { body += chunk; });
+    res.on("end", function () {
+      try {
+        var user = JSON.parse(body);
+        if (user && user.id) {
+          resolve(user);
         } else {
-          showScreen("connect");
-          toast("Signed in! Now connect Instagram.", "success");
+          resolve(null);
         }
-        return true;
+      } catch (e) {
+        resolve(null);
       }
-    }
-  } catch (e) {
-    log("Auth redirect check failed: " + e.message);
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------
-//  IG CONNECT
-// ---------------------------------------------------------------
-document.getElementById("btn-ig-connect").addEventListener("click", doIgConnect);
-document.getElementById("inp-ig-pass").addEventListener("keydown", function(e) { if (e.key === "Enter") doIgConnect(); });
-
-async function doIgConnect() {
-  var user = document.getElementById("inp-ig-user").value.trim();
-  var pass = document.getElementById("inp-ig-pass").value;
-  showErr("ig-err", "");
-
-  if (!user || !pass) { showErr("ig-err", "Please enter your Instagram username and password."); return; }
-
-  var btn = document.getElementById("btn-ig-connect");
-  btn.disabled = true; btn.textContent = "Connecting..."; setLoad("ig-bar", true);
-
-  try {
-    var res = await fetch("/api/ig/connect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ username: user, password: pass }),
     });
-    var data = await res.json();
-    setLoad("ig-bar", false);
-
-    if (data.success) {
-      igUsername = data.igUsername;
-      await loadDB();
-      showScreen("main");
-      applyPro();
-      toast("Connected @" + igUsername + "!", "success");
-      setTimeout(doSync, 800);
-      return;
-    }
-    if (data.status === "checkpoint") {
-      setText("cp-msg", data.message);
-      showErr("cp-err", "");
-      document.getElementById("inp-cp").value = "";
-      showScreen("checkpoint");
-      return;
-    }
-    if (data.status === "twofactor") {
-      buildMethods(data.methods);
-      showErr("tfa-err", "");
-      document.getElementById("inp-2fa").value = "";
-      showScreen("2fa");
-      return;
-    }
-    showErr("ig-err", data.error || "Connection failed.");
-  } catch (e) {
-    setLoad("ig-bar", false);
-    showErr("ig-err", "Cannot reach server.");
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="white" width="14" height="14"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg> Connect Instagram';
-  }
-}
-
-// ---------------------------------------------------------------
-//  CHECKPOINT
-// ---------------------------------------------------------------
-document.getElementById("back-cp").addEventListener("click", function() { showScreen("connect"); showErr("ig-err", ""); });
-document.getElementById("inp-cp").addEventListener("keydown", function(e) { if (e.key === "Enter") verifyCP(); });
-document.getElementById("btn-cp").addEventListener("click", verifyCP);
-
-async function verifyCP() {
-  var code = document.getElementById("inp-cp").value.trim();
-  showErr("cp-err", "");
-  if (!code) { showErr("cp-err", "Please enter the code."); return; }
-  var btn = document.getElementById("btn-cp"); btn.disabled = true; btn.textContent = "Verifying..."; setLoad("cp-bar", true);
-  try {
-    var res = await fetch("/api/ig/verify-checkpoint", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ code: code }) });
-    var data = await res.json(); setLoad("cp-bar", false);
-    if (data.success) { igUsername = data.igUsername; await loadDB(); showScreen("main"); applyPro(); toast("Connected @" + igUsername + "!", "success"); setTimeout(doSync, 800); }
-    else showErr("cp-err", data.error || "Incorrect code.");
-  } catch (e) { setLoad("cp-bar", false); showErr("cp-err", "Cannot reach server."); }
-  finally { btn.disabled = false; btn.textContent = "Verify & continue"; }
-}
-
-// ---------------------------------------------------------------
-//  2FA
-// ---------------------------------------------------------------
-document.getElementById("back-2fa").addEventListener("click", function() { showScreen("connect"); showErr("ig-err", ""); });
-document.getElementById("inp-2fa").addEventListener("keydown", function(e) { if (e.key === "Enter") verify2FA(); });
-document.getElementById("btn-2fa").addEventListener("click", verify2FA);
-
-function buildMethods(methods) {
-  selM = ""; var list = document.getElementById("method-list"); list.innerHTML = ""; hideEl("code-wrap");
-  var defs = { sms: { icon: "&#x1F4F1;", label: "Text message", sub: "Code to your phone" }, totp: { icon: "&#x1F510;", label: "Authenticator app", sub: "Use your auth app" }, whatsapp: { icon: "&#x1F4AC;", label: "WhatsApp", sub: "Code via WhatsApp" } };
-  methods.forEach(function(m) {
-    var d = defs[m] || { icon: "&#x1F4F1;", label: m, sub: "" };
-    var btn = document.createElement("button"); btn.className = "method-btn"; btn.dataset.method = m;
-    btn.innerHTML = '<span class="m-icon">' + d.icon + '</span><div><div class="m-lbl">' + d.label + '</div><div class="m-sub">' + d.sub + '</div></div>';
-    btn.addEventListener("click", function() {
-      selM = m;
-      document.querySelectorAll(".method-btn").forEach(function(b) { b.classList.remove("selected"); });
-      btn.classList.add("selected"); showEl("code-wrap");
-      document.getElementById("inp-2fa").placeholder = m === "totp" ? "Authenticator code" : "Code sent to your phone";
-      document.getElementById("inp-2fa").focus();
-    });
-    list.appendChild(btn);
   });
-  if (methods.length === 1) { var only = list.querySelector(".method-btn"); if (only) only.click(); }
+  req.on("error", function () { resolve(null); });
+  req.end();
+});
+```
+
+} catch (e) {
+log(“auth”, “Token verify error: “ + e.message);
+return null;
+}
 }
 
-async function verify2FA() {
-  var code = document.getElementById("inp-2fa").value.trim(); showErr("tfa-err", "");
-  if (!selM) { showErr("tfa-err", "Please select a method."); return; }
-  if (!code) { showErr("tfa-err", "Please enter your code."); return; }
-  var btn = document.getElementById("btn-2fa"); btn.disabled = true; btn.textContent = "Verifying..."; setLoad("tfa-bar", true);
-  try {
-    var res = await fetch("/api/ig/verify-2fa", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ code: code, method: selM }) });
-    var data = await res.json(); setLoad("tfa-bar", false);
-    if (data.success) { igUsername = data.igUsername; await loadDB(); showScreen("main"); applyPro(); toast("Connected @" + igUsername + "!", "success"); setTimeout(doSync, 800); }
-    else showErr("tfa-err", data.error || "Incorrect code.");
-  } catch (e) { setLoad("tfa-bar", false); showErr("tfa-err", "Cannot reach server."); }
-  finally { btn.disabled = false; btn.textContent = "Verify & continue"; }
+function authMiddleware(req, res, next) {
+var appUser = req.session && req.session.appUser;
+if (appUser) {
+req.appUser = appUser;
+return next();
+}
+return res.status(401).json({ error: “Not logged in” });
 }
 
-// ---------------------------------------------------------------
-//  SIGN OUT
-// ---------------------------------------------------------------
-function doSignOut() {
-  clearInterval(rTimer);
-  fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(function() {});
-  if (sb) sb.auth.signOut().catch(function() {});
-  appUser = ""; igUsername = "";
-  showAuthView("signup");
-  showScreen("auth");
+// —————————————————————
+//  EXPRESS SETUP
+// —————————————————————
+var app = express();
+
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json());
+app.use(express.static(path.join(__dirname, “public”)));
+app.use(session({
+secret: “fw-” + (process.env.SESSION_SECRET || “followwatch2024xK9”),
+resave: false,
+saveUninitialized: false,
+cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true },
+}));
+
+// —————————————————————
+//  ROUTE: POST /api/auth/login
+// —————————————————————
+app.post(”/api/auth/login”, async function (req, res) {
+var token = req.body.token;
+var email = req.body.email;
+var userId = req.body.userId;
+
+if (!token || !userId) {
+return res.status(400).json({ error: “Missing authentication data.” });
 }
 
-// ---------------------------------------------------------------
-//  DASHBOARD
-// ---------------------------------------------------------------
-async function loadDB() {
-  try { var res = await fetch("/api/data", { credentials: "include" }); if (!res.ok) return; var data = await res.json(); isPro = data.isPro || false; applyPro(); renderDB(data); } catch (e) {}
+var user = await verifySupabaseToken(token);
+if (!user || user.id !== userId) {
+return res.status(401).json({ error: “Invalid session. Please log in again.” });
 }
 
-function renderDB(data) {
-  setText("nav-name", "@" + data.igUsername);
-  setText("nav-status", data.tracking && data.lastChecked ? "checked " + timeAgo(data.lastChecked) : "not synced");
-  setText("ava-letter", (data.igUsername[0] || "?").toUpperCase());
-  if (data.profilePic) {
-    var f = document.getElementById("ava-face");
-    if (f) { var i = (data.igUsername[0] || "?").toUpperCase(); f.innerHTML = '<img src="' + data.profilePic + '" onerror="this.parentElement.textContent=\'' + i + '\'" alt=""/>'; }
+var appUser = userId;
+req.session.appUser = appUser;
+req.session.email = email || user.email || “”;
+
+var db = dbRead();
+var account = db.accounts[appUser];
+var igConnected = !!(account && account.igUsername);
+
+log(“auth”, “App login: “ + (email || userId));
+
+return res.json({
+success: true,
+appUser: appUser,
+email: email || user.email || “”,
+igConnected: igConnected,
+igUsername: igConnected ? account.igUsername : null,
+});
+});
+
+// —————————————————————
+//  ROUTE: GET /api/auth/status
+// —————————————————————
+app.get(”/api/auth/status”, function (req, res) {
+var appUser = req.session.appUser;
+if (!appUser) return res.json({ loggedIn: false });
+
+var db = dbRead();
+var account = db.accounts[appUser];
+var igConnected = !!(account && account.igUsername);
+
+return res.json({
+loggedIn: true,
+appUser: appUser,
+email: req.session.email || “”,
+igConnected: igConnected,
+igUsername: igConnected ? account.igUsername : null,
+isPro: account ? (account.isPro || false) : false,
+});
+});
+
+// —————————————————————
+//  ROUTE: POST /api/auth/logout
+// —————————————————————
+app.post(”/api/auth/logout”, function (req, res) {
+var appUser = req.session.appUser;
+if (appUser) {
+delete igSessions[appUser];
+delete pendingLogins[appUser];
+log(“auth”, “Logged out: “ + appUser);
+}
+req.session.destroy(function () {});
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/ig/connect
+// —————————————————————
+app.post(”/api/ig/connect”, async function (req, res) {
+var appUser = req.session.appUser;
+if (!appUser) return res.status(401).json({ error: “Not logged in” });
+
+var username = req.body.username;
+var password = req.body.password;
+
+if (!username || !password) {
+return res.status(400).json({ error: “Username and password are required.” });
+}
+
+var clean = username.trim().toLowerCase().replace(/^@/, “”);
+var ig = makeIgClient(clean);
+
+try {
+await ig.simulate.preLoginFlow();
+var user = await ig.account.login(clean, password);
+try { await ig.simulate.postLoginFlow(); } catch (e) { /* non-fatal */ }
+await finalizeIgLogin(ig, user, clean, appUser, req);
+return res.json({ success: true, igUsername: clean, fullName: user.full_name || “” });
+
+} catch (err) {
+var errMsg = (err.message || “”).toLowerCase();
+var errBody = {};
+try { errBody = err.response && err.response.body ? err.response.body : {}; } catch (e) {}
+
+```
+log("ig-login", "Error for @" + clean + ": " + err.message);
+
+var isCheckpoint = (
+  err instanceof IgCheckpointError ||
+  errMsg.includes("checkpoint") ||
+  errMsg.includes("challenge_required") ||
+  errMsg.includes("we can send you an email") ||
+  errMsg.includes("help you get back") ||
+  errMsg.includes("please wait a few minutes") ||
+  (errBody && errBody.error_type === "checkpoint_required") ||
+  (errBody && errBody.message === "checkpoint_required")
+);
+
+if (isCheckpoint) {
+  log("ig-login", "@" + clean + " triggered checkpoint");
+  var triggered = false;
+
+  if (!triggered) {
+    try { await ig.challenge.auto(true); triggered = true; }
+    catch (e1) { log("ig-login", "challenge.auto failed: " + e1.message); }
   }
-  setText("st-followers", data.followerCount.toLocaleString());
-  setText("st-unf", data.totalUnfollowers.toLocaleString());
-  setText("st-gained", data.gainedFollowers.length.toLocaleString());
-  setText("sync-info", "last checked: " + timeAgo(data.lastChecked));
-  renderChart(data.snapshots);
-  renderUnfollowers(data.unfollowers, data.hiddenUnfollowers || 0);
-  renderGained(data.gainedFollowers);
+  if (!triggered) {
+    try { await ig.challenge.selectVerifyMethod("1"); triggered = true; }
+    catch (e2) { log("ig-login", "selectVerifyMethod(email) failed: " + e2.message); }
+  }
+  if (!triggered) {
+    try { await ig.challenge.selectVerifyMethod("0"); triggered = true; }
+    catch (e3) { log("ig-login", "selectVerifyMethod(sms) failed: " + e3.message); }
+  }
+
+  if (triggered) {
+    pendingLogins[appUser] = { ig: ig, type: "checkpoint", igUsername: clean };
+    return res.json({
+      status: "checkpoint",
+      message: "Instagram sent a verification code to your email or phone. Enter it below.",
+    });
+  } else {
+    return res.status(403).json({
+      error: "Instagram is blocking this login. Open the Instagram app, go to Settings > Security > Emails From Instagram, approve the login, then try again.",
+    });
+  }
 }
 
-// SYNC
-document.getElementById("btn-sync").addEventListener("click", doSync);
-function doSync() {
-  if (syncing) return; syncing = true;
-  var bs = document.getElementById("btn-sync"), sp = document.getElementById("spin"), si = document.getElementById("sync-icon"), pw = document.getElementById("prog-wrap"), pf = document.getElementById("prog-fill");
-  bs.disabled = true; sp.style.display = "block"; si.style.display = "none"; setText("sync-label", "Syncing..."); pw.style.display = "block"; pf.style.width = "5%"; setText("prog-label", "connecting...");
-  var es = new EventSource("/api/sync", { withCredentials: true });
-  es.onmessage = function(e) {
-    var msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
-    if (msg.type === "progress") { pf.style.width = (msg.pct || 0) + "%"; setText("prog-label", msg.message || ""); }
-    if (msg.type === "done") { es.close(); resetSync(); var r = msg.result; if (!r) { loadDB(); return; }
-      if (r.isBaseline) toast("Baseline saved - tracking " + r.followerCount.toLocaleString() + " followers.", "success");
-      else if (r.newUnfollowers > 0) toast(r.newUnfollowers + " new unfollower" + (r.newUnfollowers !== 1 ? "s" : "") + " detected!", "warn");
-      else if (r.gained > 0) toast("+" + r.gained + " new follower" + (r.gained !== 1 ? "s" : ""), "success");
-      else toast("All clear - no changes.", "success"); loadDB(); }
-    if (msg.type === "error") { es.close(); resetSync(); toast(msg.message || "Sync failed", "error"); }
+var isTwoFactor = (
+  err instanceof IgLoginTwoFactorRequiredError ||
+  errMsg.includes("two_factor") ||
+  errMsg.includes("two factor") ||
+  (errBody && errBody.two_factor_required === true)
+);
+
+if (isTwoFactor) {
+  log("ig-login", "@" + clean + " requires 2FA");
+  var info = {};
+  try { info = err.response.body.two_factor_info || {}; } catch (e) {}
+
+  var methods = [];
+  if (info.totp_two_factor_on) methods.push("totp");
+  if (info.sms_two_factor_on) methods.push("sms");
+  if (info.whatsapp_two_factor_on) methods.push("whatsapp");
+  if (methods.length === 0) methods.push("sms");
+
+  pendingLogins[appUser] = { ig: ig, type: "twofactor", twoFactorInfo: info, igUsername: clean };
+  return res.json({ status: "twofactor", methods: methods });
+}
+
+var isBadPassword = (
+  errMsg.includes("bad_password") ||
+  errMsg.includes("invalid_user") ||
+  errMsg.includes("incorrect") ||
+  errMsg.includes("wrong password") ||
+  (errBody && errBody.invalid_credentials === true)
+);
+
+if (isBadPassword) {
+  return res.status(401).json({ error: "Incorrect username or password. Please try again." });
+}
+
+return res.status(500).json({ error: "Login failed: " + (err.message || "Unknown error") });
+```
+
+}
+});
+
+// —————————————————————
+//  ROUTE: POST /api/ig/verify-checkpoint
+// —————————————————————
+app.post(”/api/ig/verify-checkpoint”, async function (req, res) {
+var appUser = req.session.appUser;
+if (!appUser) return res.status(401).json({ error: “Not logged in” });
+
+var code = req.body.code;
+if (!code) return res.status(400).json({ error: “Code is required.” });
+
+var pending = pendingLogins[appUser];
+if (!pending || pending.type !== “checkpoint”) {
+return res.status(400).json({ error: “No pending checkpoint. Please try again.” });
+}
+
+try {
+var user = await pending.ig.challenge.sendSecurityCode(code.trim());
+try { await pending.ig.simulate.postLoginFlow(); } catch (e) {}
+await finalizeIgLogin(pending.ig, user, pending.igUsername, appUser, req);
+log(“auth”, “@” + pending.igUsername + “ checkpoint verified”);
+return res.json({ success: true, igUsername: pending.igUsername, fullName: user.full_name || “” });
+} catch (err) {
+var msg = (err.message || “”).toLowerCase();
+log(“auth”, “Checkpoint verify failed: “ + err.message);
+if (msg.includes(“wrong”) || msg.includes(“incorrect”) || msg.includes(“invalid”) || msg.includes(“400”) || msg.includes(“bad”) || msg.includes(“expired”)) {
+return res.status(400).json({ error: “That code is incorrect or expired. Please try again.” });
+}
+return res.status(500).json({ error: “Verification failed: “ + err.message });
+}
+});
+
+// —————————————————————
+//  ROUTE: POST /api/ig/verify-2fa
+// —————————————————————
+app.post(”/api/ig/verify-2fa”, async function (req, res) {
+var appUser = req.session.appUser;
+if (!appUser) return res.status(401).json({ error: “Not logged in” });
+
+var code = req.body.code;
+var method = req.body.method;
+if (!code) return res.status(400).json({ error: “Code is required.” });
+
+var pending = pendingLogins[appUser];
+if (!pending || pending.type !== “twofactor”) {
+return res.status(400).json({ error: “No pending 2FA. Please try again.” });
+}
+
+try {
+var ig = pending.ig;
+var twoFactorInfo = pending.twoFactorInfo || {};
+
+```
+var verificationMethod = "1";
+if (method === "totp") verificationMethod = "0";
+if (method === "whatsapp") verificationMethod = "2";
+
+var user = await ig.account.twoFactorLogin({
+  username: twoFactorInfo.username || pending.igUsername,
+  verificationCode: code.trim().replace(/\s+/g, ""),
+  twoFactorIdentifier: twoFactorInfo.two_factor_identifier || "",
+  verificationMethod: verificationMethod,
+  trustThisDevice: "1",
+});
+
+try { await ig.simulate.postLoginFlow(); } catch (e) {}
+await finalizeIgLogin(ig, user, pending.igUsername, appUser, req);
+log("auth", "@" + pending.igUsername + " 2FA verified via " + method);
+return res.json({ success: true, igUsername: pending.igUsername, fullName: user.full_name || "" });
+```
+
+} catch (err) {
+var msg = (err.message || “”).toLowerCase();
+log(“auth”, “2FA failed: “ + err.message);
+if (msg.includes(“wrong”) || msg.includes(“incorrect”) || msg.includes(“invalid”) || msg.includes(“400”) || msg.includes(“bad”) || msg.includes(“expired”)) {
+return res.status(400).json({ error: “That code is incorrect or expired. Please try again.” });
+}
+return res.status(500).json({ error: “2FA failed: “ + err.message });
+}
+});
+
+// —————————————————————
+//  ROUTE: GET /api/sync (Server-Sent Events)
+// —————————————————————
+app.get(”/api/sync”, authMiddleware, async function (req, res) {
+var appUser = req.appUser;
+
+res.setHeader(“Content-Type”, “text/event-stream”);
+res.setHeader(“Cache-Control”, “no-cache”);
+res.setHeader(“Connection”, “keep-alive”);
+res.setHeader(“X-Accel-Buffering”, “no”);
+res.flushHeaders();
+
+var keepAlive = setInterval(function () {
+try { res.write(”: ping\n\n”); } catch (e) { clearInterval(keepAlive); }
+}, 20000);
+
+function send(payload) {
+try { res.write(“data: “ + JSON.stringify(payload) + “\n\n”); } catch (e) {}
+}
+
+try {
+var result = await runSync(appUser, function (message, pct) {
+send({ type: “progress”, message: message, pct: pct });
+});
+send({ type: “done”, result: result });
+} catch (err) {
+var errMsg = err.message || “Unknown error”;
+if (errMsg === “SESSION_EXPIRED”) {
+send({ type: “error”, message: “Instagram session expired. Please reconnect your account.” });
+} else if (errMsg === “SYNC_IN_PROGRESS”) {
+send({ type: “error”, message: “A sync is already running. Please wait.” });
+} else if (errMsg === “USER_ID_MISSING”) {
+send({ type: “error”, message: “Could not retrieve your Instagram user ID. Please disconnect and reconnect your Instagram account.” });
+} else {
+send({ type: “error”, message: “Sync failed: “ + errMsg });
+}
+} finally {
+clearInterval(keepAlive);
+res.end();
+}
+});
+
+// —————————————————————
+//  ROUTE: GET /api/data
+// —————————————————————
+app.get(”/api/data”, authMiddleware, function (req, res) {
+var appUser = req.appUser;
+var db = dbRead();
+var account = db.accounts[appUser];
+if (!account) return res.status(404).json({ error: “Account not found” });
+
+var allUnfollowers = (account.unfollowers || []).filter(function (u) { return !u.dismissed; });
+var isPro = account.isPro || false;
+var visibleUnfollowers = isPro ? allUnfollowers : allUnfollowers.slice(0, 5);
+var hiddenCount = isPro ? 0 : Math.max(0, allUnfollowers.length - 5);
+
+return res.json({
+igUsername: account.igUsername,
+fullName: account.fullName || “”,
+profilePic: account.profilePic || “”,
+followerCount: (account.currentFollowers || []).length,
+unfollowers: visibleUnfollowers,
+totalUnfollowers: allUnfollowers.length,
+hiddenUnfollowers: hiddenCount,
+dismissedCount: (account.unfollowers || []).filter(function (u) { return u.dismissed; }).length,
+gainedFollowers: (account.gainedFollowers || []).slice(-50).reverse(),
+snapshots: account.snapshots || [],
+lastChecked: account.lastChecked || null,
+tracking: account.tracking || false,
+isBaseline: (account.currentFollowers || []).length === 0,
+syncInProgress: !!syncLocks[appUser],
+isPro: isPro,
+});
+});
+
+// —————————————————————
+//  ROUTE: POST /api/dismiss/:pk
+// —————————————————————
+app.post(”/api/dismiss/:pk”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+var entry = (account.unfollowers || []).find(function (u) { return u.pk === req.params.pk; });
+if (entry) entry.dismissed = true;
+dbWrite(db);
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/dismiss-all
+// —————————————————————
+app.post(”/api/dismiss-all”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+(account.unfollowers || []).forEach(function (u) { u.dismissed = true; });
+dbWrite(db);
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/clear-data
+// —————————————————————
+app.post(”/api/clear-data”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+account.currentFollowers = [];
+account.unfollowers = [];
+account.gainedFollowers = [];
+account.snapshots = [];
+account.tracking = false;
+account.lastChecked = null;
+dbWrite(db);
+log(“data”, req.appUser + “ cleared all data”);
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: DELETE /api/delete-account
+// —————————————————————
+app.delete(”/api/delete-account”, authMiddleware, function (req, res) {
+var appUser = req.appUser;
+var db = dbRead();
+delete db.accounts[appUser];
+if (db.spyTargets) delete db.spyTargets[appUser];
+dbWrite(db);
+delete igSessions[appUser];
+req.session.destroy(function () {});
+log(“data”, appUser + “ deleted their account and all data”);
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/activate-pro
+// —————————————————————
+app.post(”/api/activate-pro”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+account.isPro = true;
+dbWrite(db);
+log(“pro”, req.appUser + “ activated Pro”);
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  SPY ROUTES
+// —————————————————————
+app.post(”/api/spy/add”, authMiddleware, async function (req, res) {
+var appUser = req.appUser;
+var targetUser = (req.body.targetUser || “”).trim().toLowerCase().replace(/^@/, “”);
+
+if (!targetUser) return res.status(400).json({ error: “Target username is required.” });
+
+var db = dbRead();
+var account = db.accounts[appUser];
+if (!account || !account.isPro) {
+return res.status(403).json({ error: “Pro feature. Upgrade to use Spy mode.” });
+}
+
+var s = await rehydrate(appUser);
+if (!s) return res.status(401).json({ error: “Instagram session expired. Please reconnect.” });
+
+try {
+var targetInfo = await s.ig.user.searchExact(targetUser);
+if (!targetInfo) return res.status(404).json({ error: “User @” + targetUser + “ not found.” });
+
+```
+var targetId = String(targetInfo.pk);
+var feed = s.ig.feed.userFollowing(targetId);
+var results = [];
+var page = 0;
+do {
+  var items = await feed.items();
+  for (var i = 0; i < items.length; i++) {
+    results.push({
+      pk: String(items[i].pk),
+      username: items[i].username || "",
+      full_name: items[i].full_name || "",
+      profile_pic_url: items[i].profile_pic_url || "",
+      followedAt: Date.now(),
+    });
+  }
+  page++;
+  await sleep(900);
+  if (page > 100) break;
+} while (feed.isMoreAvailable());
+
+if (!db.spyTargets) db.spyTargets = {};
+if (!db.spyTargets[appUser]) db.spyTargets[appUser] = {};
+
+var existing = db.spyTargets[appUser][targetUser];
+var now = Date.now();
+var oneMonth = 30 * 24 * 60 * 60 * 1000;
+
+var newFollows = [];
+if (existing && existing.following) {
+  var oldPKs = new Set(existing.following.map(function (u) { return u.pk; }));
+  newFollows = results
+    .filter(function (u) { return !oldPKs.has(u.pk); })
+    .map(function (u) { return Object.assign({}, u, { followedAt: now, followedAtFormatted: fmtDate(now) }); });
+
+  var merged = (existing.recentFollows || [])
+    .filter(function (u) { return now - u.followedAt < oneMonth; })
+    .concat(newFollows);
+
+  var seen = {};
+  merged = merged.filter(function (u) {
+    if (seen[u.pk]) return false;
+    seen[u.pk] = true;
+    return true;
+  });
+
+  db.spyTargets[appUser][targetUser].following = results;
+  db.spyTargets[appUser][targetUser].recentFollows = merged;
+  db.spyTargets[appUser][targetUser].lastChecked = now;
+  db.spyTargets[appUser][targetUser].newThisCheck = newFollows.length;
+} else {
+  db.spyTargets[appUser][targetUser] = {
+    targetUser: targetUser,
+    targetId: targetId,
+    displayName: targetInfo.full_name || targetUser,
+    profilePic: targetInfo.profile_pic_url || "",
+    following: results,
+    recentFollows: [],
+    lastChecked: now,
+    addedAt: now,
+    newThisCheck: 0,
   };
-  es.onerror = function() { es.close(); resetSync(); toast("Connection lost.", "error"); };
-}
-function resetSync() { syncing = false; document.getElementById("btn-sync").disabled = false; document.getElementById("spin").style.display = "none"; document.getElementById("sync-icon").style.display = ""; setText("sync-label", "Sync"); document.getElementById("prog-wrap").style.display = "none"; document.getElementById("prog-fill").style.width = "0%"; }
-
-// CHART
-function renderChart(snaps) {
-  var wrap = document.getElementById("chart-wrap");
-  if (!snaps || snaps.length < 2) { wrap.style.display = "none"; return; }
-  wrap.style.display = "block"; var last = snaps.slice(-10);
-  var max = Math.max.apply(null, last.map(function(s) { return s.count; }));
-  var min = Math.min.apply(null, last.map(function(s) { return s.count; }));
-  var span = max - min || 1;
-  var bars = document.getElementById("chart-bars"); bars.innerHTML = "";
-  last.forEach(function(s, i) {
-    var pct = (s.count - min) / span; var h = Math.round(10 + pct * 40); var isLast = i === last.length - 1;
-    var col = document.createElement("div"); col.className = "bar-col";
-    var fill = document.createElement("div"); fill.className = "bar-fill"; fill.style.height = h + "px"; fill.style.background = isLast ? "var(--acc)" : "rgba(255,255,255,.07)"; fill.title = s.count.toLocaleString() + " followers";
-    var lbl = document.createElement("div"); lbl.className = "bar-date"; var d = new Date(s.timestamp); lbl.textContent = (d.getMonth() + 1) + "/" + (d.getDate());
-    col.appendChild(fill); col.appendChild(lbl); bars.appendChild(col);
-  });
 }
 
-// LISTS
-function renderUnfollowers(list, hiddenCount) {
-  var c = document.getElementById("unf-list"), tn = document.getElementById("tab-unf-n"), da = document.getElementById("btn-dismiss-all");
-  if (!list || list.length === 0) {
-    tn.style.display = "none"; da.style.display = "none";
-    c.innerHTML = '<div class="empty"><div class="empty-icon">&#x2713;</div><div class="empty-txt">No unfollowers yet.<br/>Auto-checking every 5 minutes.</div></div>';
-    return;
-  }
-  tn.textContent = list.length + (hiddenCount > 0 ? "+" : ""); tn.style.display = ""; da.style.display = "";
-  var html = list.slice().sort(function(a, b) { return b.unfollowedAt - a.unfollowedAt; }).map(function(u, i) {
-    var init = (u.username[0] || "?").toUpperCase();
-    var pic = u.profile_pic_url ? '<img src="' + u.profile_pic_url + '" onerror="this.parentElement.textContent=\'' + init + '\'">' : init;
-    return '<div class="user-row" style="animation-delay:' + i * 20 + 'ms"><div class="u-pic">' + pic + '</div><div class="u-info"><div class="u-handle">@' + u.username + '</div><div class="u-name">' + (u.full_name || "") + '</div></div><div class="u-time"><div class="u-ago r">' + timeAgo(u.unfollowedAt) + '</div><div class="u-date">' + (u.unfollowedAtFormatted || "") + '</div></div><button class="btn-x" onclick="dismissOne(\'' + u.pk + '\')">x</button></div>';
-  }).join("");
+dbWrite(db);
+log("spy", appUser + " tracking @" + targetUser + " (" + results.length + " following)");
+return res.json({
+  success: true,
+  targetUser: targetUser,
+  followingCount: results.length,
+  recentFollows: db.spyTargets[appUser][targetUser].recentFollows,
+  isBaseline: !existing,
+});
+```
 
-  if (hiddenCount > 0) {
-    html += '<div class="hidden-count" onclick="openModal()">+ ' + hiddenCount + ' more unfollowers hidden - Upgrade to Pro to see all</div>';
-  }
-  c.innerHTML = html;
+} catch (err) {
+log(“spy”, “Error tracking @” + targetUser + “: “ + err.message);
+if ((err.message || “”).toLowerCase().includes(“not found”) || (err.message || “”).includes(“404”)) {
+return res.status(404).json({ error: “User @” + targetUser + “ not found or account is private.” });
 }
-
-function renderGained(list) {
-  var c = document.getElementById("gained-list"), tn = document.getElementById("tab-gained-n");
-  if (!list || list.length === 0) { tn.style.display = "none"; c.innerHTML = '<div class="empty"><div class="empty-icon">&#x1F465;</div><div class="empty-txt">New followers since your first sync<br/>will appear here.</div></div>'; return; }
-  tn.textContent = list.length; tn.style.display = "";
-  c.innerHTML = list.map(function(u, i) {
-    var init = (u.username[0] || "?").toUpperCase();
-    var pic = u.profile_pic_url ? '<img src="' + u.profile_pic_url + '" onerror="this.parentElement.textContent=\'' + init + '\'">' : init;
-    return '<div class="user-row" style="animation-delay:' + i * 20 + 'ms"><div class="u-pic">' + pic + '</div><div class="u-info"><div class="u-handle">@' + u.username + '</div><div class="u-name">' + (u.full_name || "") + '</div></div><div class="u-time"><div class="u-ago g">' + timeAgo(u.followedAt) + '</div><div class="u-date">' + (u.followedAtFormatted || "") + '</div></div></div>';
-  }).join("");
+return res.status(500).json({ error: “Could not fetch data for @” + targetUser + “: “ + err.message });
 }
-
-async function dismissOne(pk) { try { await fetch("/api/dismiss/" + pk, { method: "POST", credentials: "include" }); await loadDB(); } catch (e) { toast("Couldn't dismiss.", "error"); } }
-document.getElementById("btn-dismiss-all").addEventListener("click", async function() { try { await fetch("/api/dismiss-all", { method: "POST", credentials: "include" }); await loadDB(); toast("All dismissed.", "success"); } catch (e) { toast("Failed.", "error"); } });
-
-// BOTTOM NAV
-var tabOrder = ["tracker", "menu"];
-document.querySelectorAll(".bnav-btn").forEach(function(btn) {
-  btn.addEventListener("click", function() {
-    var tab = btn.dataset.tab; if (tab === curTab) return;
-    var pi = tabOrder.indexOf(curTab), ni = tabOrder.indexOf(tab);
-    var dir = ni > pi ? "from-right" : "from-left";
-    document.querySelectorAll(".bnav-btn").forEach(function(b) { b.classList.remove("active"); });
-    btn.classList.add("active");
-    var prev = document.getElementById("panel-" + curTab), next = document.getElementById("panel-" + tab);
-    if (prev) prev.classList.remove("active", "from-right", "from-left");
-    if (next) { next.classList.remove("active", "from-right", "from-left"); void next.offsetWidth; next.classList.add("active", dir); }
-    curTab = tab;
-  });
 });
 
-// SUB TABS
-document.querySelectorAll(".sub-tab").forEach(function(btn) {
-  btn.addEventListener("click", function() {
-    var sub = btn.dataset.sub;
-    document.querySelectorAll(".sub-tab").forEach(function(b) { b.classList.remove("active"); });
-    document.querySelectorAll(".subpanel").forEach(function(p) { p.classList.remove("active"); });
-    btn.classList.add("active");
-    var panel = document.getElementById("panel-" + sub); if (panel) panel.classList.add("active");
-  });
+app.get(”/api/spy/list”, authMiddleware, function (req, res) {
+var db = dbRead();
+var targets = db.spyTargets && db.spyTargets[req.appUser] ? db.spyTargets[req.appUser] : {};
+var now = Date.now();
+var oneMonth = 30 * 24 * 60 * 60 * 1000;
+
+var list = Object.values(targets).map(function (t) {
+return {
+targetUser: t.targetUser,
+displayName: t.displayName,
+profilePic: t.profilePic,
+followingCount: (t.following || []).length,
+recentFollows: (t.recentFollows || []).filter(function (u) { return now - u.followedAt < oneMonth; }),
+lastChecked: t.lastChecked,
+addedAt: t.addedAt,
+};
 });
 
-// TOGGLE
-document.getElementById("pill").addEventListener("click", function() {
-  var p = document.getElementById("pill");
-  if (p.classList.contains("on")) { p.classList.remove("on"); setText("toggle-sub", "paused"); }
-  else { p.classList.add("on"); setText("toggle-sub", "running"); }
+return res.json({ targets: list });
 });
 
-// PRO FEATURES
-function runNonFollowers() { if (!isPro) { openModal(); return; } toast("Fetching non-followers... (coming soon)", "warn"); }
-async function exportCSV() {
-  if (!isPro) { openModal(); return; }
-  try {
-    var r = await fetch("/api/data", { credentials: "include" }); var data = await r.json();
-    var rows = [["username", "full_name", "unfollowed_at"]];
-    (data.unfollowers || []).forEach(function(u) { rows.push([u.username, u.full_name || "", u.unfollowedAtFormatted || ""]); });
-    var csv = rows.map(function(row) { return row.map(function(c) { return '"' + (c || "").replace(/"/g, '""') + '"'; }).join(","); }).join("\n");
-    var blob = new Blob([csv], { type: "text/csv" }); var url = URL.createObjectURL(blob);
-    var a = document.createElement("a"); a.href = url; a.download = "unfollowers.csv"; a.click(); URL.revokeObjectURL(url);
-    toast("CSV downloaded!", "success");
-  } catch (e) { toast("Export failed: " + e.message, "error"); }
+app.delete(”/api/spy/remove/:target”, authMiddleware, function (req, res) {
+var db = dbRead();
+if (db.spyTargets && db.spyTargets[req.appUser]) {
+delete db.spyTargets[req.appUser][req.params.target];
+dbWrite(db);
+}
+return res.json({ success: true });
+});
+
+// —————————————————————
+//  ROUTE: GET /api/config
+// —————————————————————
+app.get(”/api/config”, function (req, res) {
+res.json({
+supabaseUrl: SUPABASE_URL,
+supabaseAnonKey: SUPABASE_ANON_KEY,
+});
+});
+
+// —————————————————————
+//  CRON: auto-check all tracked accounts every 5 minutes
+// —————————————————————
+cron.schedule(”*/5 * * * *”, async function () {
+var db = dbRead();
+var accounts = Object.entries(db.accounts);
+
+for (var i = 0; i < accounts.length; i++) {
+var appUser = accounts[i][0];
+var account = accounts[i][1];
+
+```
+if (!account.tracking) continue;
+if (!account.igUsername) continue;
+if (syncLocks[appUser]) {
+  log("cron", appUser + " sync already running, skipping");
+  continue;
 }
 
-// AUTO REFRESH
-rTimer = setInterval(function() { if (document.getElementById("screen-main").classList.contains("active")) loadDB(); }, 30000);
-
-// CONFIRM MODAL
-var cAction = null;
-function showConfirm(icon, title, msg, label, action) { cAction = action; setText("confirm-icon", icon); setText("confirm-title", title); setText("confirm-msg", msg); document.getElementById("confirm-btn").textContent = label; document.getElementById("confirm-overlay").classList.add("open"); document.body.style.overflow = "hidden"; }
-function closeConfirm() { document.getElementById("confirm-overlay").classList.remove("open"); document.body.style.overflow = ""; cAction = null; }
-function closeConfirmOutside(e) { if (e.target === document.getElementById("confirm-overlay")) closeConfirm(); }
-function runConfirmAction() { if (cAction) cAction(); closeConfirm(); }
-function confirmClearData() { showConfirm("&#x1F5D1;", "Clear all data?", "Wipes your follower history and unfollower list. Your Instagram account is not affected.", "Yes, clear everything", async function() { try { await fetch("/api/clear-data", { method: "POST", credentials: "include" }); await loadDB(); toast("All data cleared!", "success"); } catch (e) { toast("Failed", "error"); } }); }
-function confirmDeleteAccount() { showConfirm("&#x274C;", "Delete account?", "Permanently deletes your account and ALL data from our servers. Cannot be undone.", "Delete everything permanently", async function() { try { await fetch("/api/delete-account", { method: "DELETE", credentials: "include" }); toast("Account deleted. Goodbye!", "success"); setTimeout(function() { doSignOut(); }, 1500); } catch (e) { toast("Failed", "error"); } }); }
-
-// SPY
-function toggleSpySection() { if (!isPro) { openModal(); return; } var s = document.getElementById("spy-section"); if (!s) return; var h = s.style.display === "none" || s.style.display === ""; s.style.display = h ? "block" : "none"; if (h) renderSpyPanel(); }
-function renderSpyPanel() { var gate = document.getElementById("spy-gate-menu"), ui = document.getElementById("spy-ui"); if (!isPro) { if (gate) gate.style.display = "block"; if (ui) ui.style.display = "none"; } else { if (gate) gate.style.display = "none"; if (ui) ui.style.display = "block"; loadSpyTargets(); } }
-async function loadSpyTargets() { try { var res = await fetch("/api/spy/list", { credentials: "include" }); var data = await res.json(); renderSpyTargets(data.targets || []); } catch (e) {} }
-function renderSpyTargets(targets) {
-  var c = document.getElementById("spy-targets-list"); if (!c) return;
-  if (!targets || targets.length === 0) { c.innerHTML = '<div class="empty" style="padding:20px 0"><div class="empty-icon">&#x1F50D;</div><div class="empty-txt">Enter a username above to start tracking.</div></div>'; return; }
-  c.innerHTML = targets.map(function(t) {
-    var recent = t.recentFollows || [];
-    var init = (t.targetUser[0] || "?").toUpperCase();
-    var picHtml = t.profilePic ? '<img src="' + t.profilePic + '" onerror="this.parentElement.textContent=\'' + init + '\'" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>' : init;
-    var recentHtml = recent.length === 0
-      ? '<div style="font-size:11px;color:var(--tx3);padding:8px 0;font-family:\'JetBrains Mono\',monospace">no new follows in last 30 days</div>'
-      : recent.slice(0, 20).map(function(u) {
-          var ui = (u.username[0] || "?").toUpperCase();
-          var up = u.profile_pic_url ? '<img src="' + u.profile_pic_url + '" onerror="this.parentElement.textContent=\'' + ui + '\'" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>' : ui;
-          return '<div class="user-row" style="padding:9px 0"><div class="u-pic" style="width:32px;height:32px;font-size:11px">' + up + '</div><div class="u-info"><div class="u-handle" style="font-size:13px">@' + u.username + '</div><div class="u-name">' + (u.full_name || "") + '</div></div><div class="u-time"><div class="u-ago g">' + timeAgo(u.followedAt) + '</div></div></div>';
-        }).join("");
-    return '<div style="background:var(--bg);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-top:8px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div style="display:flex;align-items:center;gap:9px"><div class="u-pic" style="width:32px;height:32px;font-size:11px">' + picHtml + '</div><div><div style="font-size:13px;font-weight:600">@' + t.targetUser + '</div><div style="font-family:\'JetBrains Mono\',monospace;font-size:9px;color:var(--tx3)">' + (t.followingCount || 0).toLocaleString() + ' following - ' + timeAgo(t.lastChecked) + '</div></div></div><div style="display:flex;gap:6px"><button onclick="spyRefresh(\'' + t.targetUser + '\')" style="background:var(--s2);border:1px solid var(--bd);color:var(--tx2);border-radius:7px;padding:5px 10px;font-size:11px;font-family:\'Albert Sans\',sans-serif;cursor:pointer">Refresh</button><button onclick="spyRemove(\'' + t.targetUser + '\')" style="background:none;border:1px solid var(--bd);color:var(--tx3);border-radius:7px;padding:5px 9px;font-size:13px;cursor:pointer">x</button></div></div><div style="font-family:\'JetBrains Mono\',monospace;font-size:9px;color:var(--tx3);letter-spacing:.8px;text-transform:uppercase;margin-bottom:6px">followed last 30 days' + (recent.length > 0 ? " (" + recent.length + ")" : "") + '</div><div class="user-list">' + recentHtml + '</div></div>';
-  }).join("");
+try {
+  log("cron", "Checking " + appUser + " (@" + account.igUsername + ")");
+  var r = await runSync(appUser);
+  log("cron", "@" + account.igUsername + ": " + r.followerCount + " followers | -" + r.newUnfollowers + " | +" + r.gained);
+} catch (err) {
+  log("cron", appUser + " error: " + err.message);
 }
-async function spyAddUser() {
-  if (!isPro) { openModal(); return; }
-  var inp = document.getElementById("spy-input"), target = (inp.value || "").trim().toLowerCase().replace(/^@/, ""), errEl = document.getElementById("spy-add-err"), loadEl = document.getElementById("spy-add-load"), btn = document.getElementById("btn-spy-add");
-  errEl.style.display = "none"; if (!target) { errEl.textContent = "Enter a username first."; errEl.style.display = "block"; return; }
-  btn.disabled = true; btn.textContent = "Fetching..."; loadEl.style.display = "block";
-  try {
-    var res = await fetch("/api/spy/add", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ targetUser: target }) });
-    var data = await res.json(); loadEl.style.display = "none";
-    if (data.success) { inp.value = ""; toast(data.isBaseline ? "Now tracking @" + target : "Updated @" + target, "success"); loadSpyTargets(); }
-    else { errEl.textContent = data.error || "Could not track that user."; errEl.style.display = "block"; }
-  } catch (e) { loadEl.style.display = "none"; errEl.textContent = "Server error."; errEl.style.display = "block"; }
-  finally { btn.disabled = false; btn.textContent = "Track"; }
+
+if (i < accounts.length - 1) await sleep(10000);
+```
+
 }
-async function spyRefresh(t) { toast("Refreshing @" + t + "...", "success"); try { var res = await fetch("/api/spy/add", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ targetUser: t }) }); var data = await res.json(); if (data.success) { toast("@" + t + " updated", "success"); loadSpyTargets(); } else toast(data.error || "Refresh failed", "error"); } catch (e) { toast("Refresh failed", "error"); } }
-async function spyRemove(t) { try { await fetch("/api/spy/remove/" + t, { method: "DELETE", credentials: "include" }); toast("Stopped tracking @" + t, "success"); loadSpyTargets(); } catch (e) { toast("Could not remove", "error"); } }
-var si = document.getElementById("spy-input"); if (si) si.addEventListener("keydown", function(e) { if (e.key === "Enter") spyAddUser(); });
+});
 
-// ---------------------------------------------------------------
-//  INIT
-// ---------------------------------------------------------------
-(async function init() {
-  await initSupabase();
-
-  // Check for OAuth redirect first
-  var handled = await handleAuthRedirect();
-  if (handled) return;
-
-  // Check existing server session
-  try {
-    var res = await fetch("/api/auth/status", { credentials: "include" });
-    var data = await res.json();
-    if (data.loggedIn) {
-      appUser = data.appUser;
-      isPro = data.isPro || false;
-      if (data.igConnected) {
-        igUsername = data.igUsername;
-        await loadDB();
-        showScreen("main");
-        applyPro();
-      } else {
-        showScreen("connect");
-      }
-      return;
-    }
-  } catch (e) {}
-
-  // Not logged in - show auth
-  showScreen("auth");
-})();
-</script>
-</body>
-</html>
+// —————————————————————
+//  START SERVER
+// —————————————————————
+app.listen(PORT, function () {
+console.log(””);
+console.log(”======================================”);
+console.log(”  FollowWatch is running!”);
+console.log(”  URL: http://localhost:” + PORT);
+console.log(”  Proxy: “ + (PROXY_URL ? “enabled” : “disabled”));
+console.log(”  Supabase: “ + (SUPABASE_URL ? “configured” : “NOT configured”));
+console.log(”  Auto-sync: every 5 minutes”);
+console.log(”======================================”);
+console.log(””);
+});
