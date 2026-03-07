@@ -206,13 +206,18 @@ log(“auth”, “IG @” + igUsername + “ connected for app user “ + appUs
 }
 
 // —————————————————————
+//  HELPER: check if a userId value is valid
+// —————————————————————
+function isValidUserId(uid) {
+return uid && uid !== “undefined” && uid !== “null” && uid !== “”;
+}
+
+// —————————————————————
 //  REHYDRATE IG SESSION FROM DISK
-//  FIX: if userId is missing from DB, fetch it live from Instagram
-//       and patch it back so future syncs don’t hit undefined/404.
 // —————————————————————
 async function rehydrate(appUser) {
-// Only return cached session if it actually has a userId
-if (igSessions[appUser] && igSessions[appUser].userId) {
+// Only return cached session if it actually has a valid userId
+if (igSessions[appUser] && isValidUserId(igSessions[appUser].userId)) {
 return igSessions[appUser];
 }
 
@@ -227,12 +232,13 @@ await ig.state.deserialize(account.sessionState);
 ```
 var userId = account.userId;
 
-// userId missing - recover it live from Instagram and patch DB
-if (!userId) {
-  log("session", "@" + account.igUsername + " userId missing - fetching from Instagram");
+// userId missing or corrupted - recover it live from Instagram
+if (!isValidUserId(userId)) {
+  log("session", "@" + account.igUsername + " userId missing/corrupted ('" + userId + "') - fetching from Instagram");
   try {
     var currentUser = await ig.account.currentUser();
     userId = String(currentUser.pk);
+    // Patch back into DB permanently so this only runs once
     db.accounts[appUser].userId = userId;
     dbWrite(db);
     log("session", "@" + account.igUsername + " userId recovered: " + userId);
@@ -271,8 +277,8 @@ var s = await rehydrate(appUser);
 if (!s) throw new Error(“SESSION_EXPIRED”);
 
 ```
-// Safety guard
-if (!s.userId) throw new Error("USER_ID_MISSING");
+// Safety guard - belt-and-braces check after rehydrate
+if (!isValidUserId(s.userId)) throw new Error("USER_ID_MISSING");
 
 notify("Connecting to Instagram...", 5);
 
@@ -978,6 +984,75 @@ supabaseAnonKey: SUPABASE_ANON_KEY,
 });
 
 // —————————————————————
+//  ROUTE: GET /api/credits - get user credit balance
+// —————————————————————
+app.get(”/api/credits”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+return res.json({
+credits: account.credits || 0,
+adWatched: account.adWatched || false,
+reviewGiven: account.reviewGiven || false,
+unlockedSlots: account.unlockedSlots || 0,
+});
+});
+
+// —————————————————————
+//  ROUTE: POST /api/credits/ad-watched - award 2 credits for watching ad
+// —————————————————————
+app.post(”/api/credits/ad-watched”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+account.credits = (account.credits || 0) + 2;
+account.adWatched = true;
+dbWrite(db);
+log(“credits”, req.appUser + “ earned 2 credits from ad. Total: “ + account.credits);
+return res.json({ success: true, credits: account.credits });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/credits/review-given - award 3 credits for review
+// —————————————————————
+app.post(”/api/credits/review-given”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+if (account.reviewGiven) {
+return res.status(400).json({ error: “Review bonus already claimed.” });
+}
+
+account.credits = (account.credits || 0) + 3;
+account.reviewGiven = true;
+dbWrite(db);
+log(“credits”, req.appUser + “ earned 3 credits from review. Total: “ + account.credits);
+return res.json({ success: true, credits: account.credits });
+});
+
+// —————————————————————
+//  ROUTE: POST /api/credits/unlock-unfollower - spend 5 credits to unlock 1 unfollower reveal
+// —————————————————————
+app.post(”/api/credits/unlock-unfollower”, authMiddleware, function (req, res) {
+var db = dbRead();
+var account = db.accounts[req.appUser];
+if (!account) return res.status(404).json({ error: “Not found” });
+
+var credits = account.credits || 0;
+if (credits < 5) {
+return res.status(400).json({ error: “Not enough credits. You need 5 credits.”, credits: credits });
+}
+
+account.credits = credits - 5;
+account.unlockedSlots = (account.unlockedSlots || 0) + 1;
+dbWrite(db);
+log(“credits”, req.appUser + “ spent 5 credits to unlock 1 unfollower. Credits left: “ + account.credits);
+return res.json({ success: true, credits: account.credits, unlockedSlots: account.unlockedSlots });
+});
+
+// —————————————————————
 //  CRON: auto-check all tracked accounts every 5 minutes
 // —————————————————————
 cron.schedule(”*/5 * * * *”, async function () {
@@ -1020,6 +1095,10 @@ console.log(”  FollowWatch is running!”);
 console.log(”  URL: http://localhost:” + PORT);
 console.log(”  Proxy: “ + (PROXY_URL ? “enabled” : “disabled”));
 console.log(”  Supabase: “ + (SUPABASE_URL ? “configured” : “NOT configured”));
+console.log(”  Auto-sync: every 5 minutes”);
+console.log(”======================================”);
+console.log(””);
+});
 console.log(”  Auto-sync: every 5 minutes”);
 console.log(”======================================”);
 console.log(””);
